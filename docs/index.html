@@ -883,13 +883,28 @@ async function refreshBoards() {
   }
 }
 
+let pollTimer = null;
+
 async function poll() {
-  const d = await (await fetch("/api/status")).json();
-  const pct = d.total ? Math.round(100*d.done/d.total) : 0;
-  const left = d.remaining_s ? `, about ${Math.round(d.remaining_s/60)} min left` : "";
+  // This used to have no error handling, so one transient fetch failure threw,
+  // killed the chain and the status bar froze silently for the rest of the
+  // plot while the machine carried on drawing. Never stop polling: a network
+  // blip is not a reason to stop watching a two hour job.
+  clearTimeout(pollTimer);
+  let d = null;
+  try {
+    d = await (await fetch("/api/status", { cache: "no-store" })).json();
+  } catch (e) {
+    pollTimer = setTimeout(poll, 3000);
+    return;
+  }
+  const pct = d.total ? Math.round(100 * d.done / d.total) : 0;
+  const left = d.remaining_s ? `, about ${Math.round(d.remaining_s / 60)} min left` : "";
   setStatus(d.state, d.state === "running"
     ? `${d.message}, ${pct}% (${d.done}/${d.total})${left}` : d.message);
-  if (d.busy) setTimeout(poll, 1200);
+  // Keep a slow heartbeat when idle so a plot started from another tab, or
+  // from the command line, still shows up here.
+  pollTimer = setTimeout(poll, d.busy ? 1200 : 5000);
 }
 
 function downloadSvg() {
