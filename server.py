@@ -27,7 +27,7 @@ from flask import Flask, jsonify, request, send_from_directory
 
 from pen_box import MODELS  # noqa: E402  the machine travel envelopes
 
-VERSION = "0.4.0"
+VERSION = "0.5.0"
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DOCS = os.path.join(HERE, "docs")
@@ -168,6 +168,89 @@ def list_boards():
     return out
 
 
+# Calibrated against these boards today: a powered AxiDraw read 0303 counts on
+# the V+ channel with a 9 V supply, an unpowered one read 0026. The board runs
+# its logic off USB, so it answers every command and reports a finished plot
+# with the motor supply off.
+ADC_VOLTS_PER_COUNT = 0.0295
+MIN_MOTOR_VOLTS = 5.0
+
+
+def board_health(device):
+    """Ask a board about its motor supply before trusting it with a plot."""
+    import serial
+
+    def ask(sp, cmd):
+        sp.reset_input_buffer()
+        sp.write((cmd + "\r").encode())
+        time.sleep(0.35)
+        return sp.read(150).decode(errors="replace").strip()
+
+    with serial.Serial(device, 9600, timeout=2) as sp:
+        time.sleep(0.25)
+        qc = ask(sp, "QC").splitlines()[0]
+        qg = ask(sp, "QG").splitlines()[0]
+        ver = ask(sp, "V").splitlines()[0]
+    volts = int(qc.split(",")[1]) * ADC_VOLTS_PER_COUNT
+    return {"volts": round(volts, 1), "qg": qg, "firmware": ver, "qc": qc}
+
+
+def preflight(port):
+    """Hardware claims, checked before the motors are asked to do anything.
+
+    A whole afternoon went into a board that was in a fault state: it returned
+    OK to every command, advanced its step counter, and finished a plot with
+    timings that matched real motion exactly, while nothing turned. Geometry
+    claims cannot see any of that. These ask the board itself.
+    """
+    out = []
+
+    def req(label, cond, detail="", ok_detail=""):
+        # The long explanation is why it failed, so only say it when it did.
+        out.append({"label": label, "ok": bool(cond),
+                    "detail": ok_detail if cond else detail})
+        return bool(cond)
+
+    boards = list_boards()
+    if not boards:
+        req("a plotter is attached", False, "no EiBotBoard found on USB")
+        return False, out
+
+    chosen = None
+    if port:
+        for b in boards:
+            if port in (b["nickname"], b["device"]):
+                chosen = b
+                break
+        if not req("the chosen plotter is attached", chosen is not None,
+                   f"{port} is not among " +
+                   ", ".join(b["label"] for b in boards),
+                   ok_detail=port):
+            return False, out
+    else:
+        if not req("only one plotter, so auto-select is safe", len(boards) == 1,
+                   f"{len(boards)} boards attached, pick one by name"):
+            return False, out
+        chosen = boards[0]
+
+    try:
+        h = board_health(chosen["device"])
+    except Exception as exc:
+        req("the board answers", False, f"{type(exc).__name__}: {exc}")
+        return False, out
+
+    ok = req("the board answers", True, h["firmware"])
+    ok &= req("motor power is present",
+              h["volts"] >= MIN_MOTOR_VOLTS,
+              f"only {h['volts']} V on the motor rail. The board runs its logic "
+              f"off USB, so with the supply off it accepts a whole plot and "
+              f"reports it finished while nothing moves. Check the barrel jack.",
+              ok_detail=f"{h['volts']} V on the motor rail")
+    out.append({"label": "board status byte", "ok": True,
+                "detail": f"QG {h['qg']}, recorded not judged"})
+    return bool(ok), out
+
+
 def plot_worker(points, model, speed, pen_up, pen_down, preview, accel=75,
                 port=None):
     from pyaxidraw import axidraw
@@ -291,6 +374,11 @@ def check():
     points = body.get("points") or []
     model = int(body.get("model", 2))
     ok, claims = check_claims(points, model)
+    # Ask the hardware too, but only when nothing is using it.
+    if job.state != "running":
+        hw_ok, hw = preflight(body.get("port") or None)
+        claims = claims + hw
+        ok = ok and hw_ok
     length = path_length(points) if len(points) >= 2 else 0.0
     # Rough: AxiDraw full pen-down speed is about 218 mm/s, and the speed
     # option is a percentage of it. Acceleration and pen lifts are ignored, so
@@ -317,10 +405,15 @@ def plot():
         model = int(body.get("model", 2))
 
         ok, claims = check_claims(points, model)
+        hw_ok, hw = preflight(body.get("port") or None)
+        claims = claims + hw
+        ok = ok and hw_ok
         if not ok:
-            failed = [c["label"] for c in claims if not c["ok"]]
-            return jsonify({"ok": False, "message": "refusing to move: " + "; ".join(failed),
-                            "claims": claims}), 400
+            failed = [c for c in claims if not c["ok"]]
+            return jsonify({"ok": False, "claims": claims,
+                            "message": "refusing to move: " +
+                            "; ".join(f"{c['label']} ({c['detail']})" if c["detail"]
+                                      else c["label"] for c in failed)}), 400
 
         job.stop.clear()
         job.state = "running"
