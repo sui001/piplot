@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>lyre plotter</title>
+<title>piplot</title>
 <style>
   :root {
     --ink: #101014; --panel: #ffffff; --page: #eceae4;
@@ -70,7 +70,7 @@
 </head>
 <body>
 <header>
-  <h1>lyre plotter</h1>
+  <h1>piplot</h1>
   <span class="v" id="ver">v?</span>
   <span class="host" id="host"></span>
   <span style="color:#d4d4d8">swept-family curve studio for pen plotters</span>
@@ -653,7 +653,7 @@ function downloadSvg() {
   const url = URL.createObjectURL(new Blob([svg], { type: "image/svg+xml" }));
   const a = document.createElement("a");
   a.href = url;
-  a.download = `lyre_${$("mode").value}_${$("preset").value}.svg`;
+  a.download = `piplot_${$("mode").value}_${$("preset").value}.svg`;
   document.body.appendChild(a);
   a.click();
   a.remove();
