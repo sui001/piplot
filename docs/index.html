@@ -189,6 +189,14 @@
       <input type="range" id="margin" min="0" max="60" step="1" value="20"><output id="marginV"></output></div>
     <div class="row"><label for="rot90">rotate</label>
       <input type="checkbox" id="rot90" style="justify-self:start"><output></output></div>
+    <div class="row"><label for="nib">nib width</label>
+      <input type="range" id="nib" min="0.05" max="2" step="0.01" value="0.3"><output id="nibV"></output></div>
+    <div class="row"><label for="simp">simplify</label>
+      <input type="range" id="simp" min="0" max="1" step="0.01" value="0.25"><output id="simpV"></output></div>
+    <div class="note">Simplify drops points that sit closer to the line than
+      the given fraction of a nib width. You cannot see error smaller than the
+      line is wide, and every point you keep is another accelerate and stop for
+      the motors, so this is what makes a plot smooth rather than jerky.</div>
     <div class="row"><label for="speed">speed</label>
       <input type="range" id="speed" min="5" max="100" step="1" value="25"><output id="speedV"></output></div>
     <div class="row"><label for="penDown">pen down</label>
@@ -208,6 +216,8 @@
       <span>path <b id="sLen">0</b> mm</span>
       <span>est <b id="sEst">0</b></span>
       <span>size <b id="sSize">0</b> mm</span>
+      <span>kept <b id="sKept">0</b></span>
+      <span>spacing <b id="sGap">0</b></span>
     </div>
     <div class="bar">
       <button id="bCheck">check on machine</button>
@@ -505,6 +515,72 @@ function fitToPaper(pts) {
            w: w*s, h: h*s, pw, ph };
 }
 
+/* -------------------------------------------------------------- simplify */
+
+function rdp(pts, eps) {
+  // Ramer-Douglas-Peucker, iterative so a 60k-point path cannot blow the
+  // stack. eps is in paper millimetres, so it means the same thing whatever
+  // the curve was generated in.
+  if (pts.length < 3 || eps <= 0) return pts;
+  const keep = new Uint8Array(pts.length);
+  keep[0] = keep[pts.length - 1] = 1;
+  const stack = [[0, pts.length - 1]];
+  while (stack.length) {
+    const [a, b] = stack.pop();
+    if (b - a < 2) continue;
+    const [ax, ay] = pts[a], [bx, by] = pts[b];
+    const dx = bx - ax, dy = by - ay;
+    const len = Math.hypot(dx, dy);
+    let worst = -1, wi = -1;
+    for (let i = a + 1; i < b; i++) {
+      const [px, py] = pts[i];
+      // Degenerate chord (a closed pass) falls back to distance from the end.
+      const d = len < 1e-9 ? Math.hypot(px - ax, py - ay)
+                           : Math.abs(dy * (px - ax) - dx * (py - ay)) / len;
+      if (d > worst) { worst = d; wi = i; }
+    }
+    if (worst > eps) { keep[wi] = 1; stack.push([a, wi], [wi, b]); }
+  }
+  const out = [];
+  for (let i = 0; i < pts.length; i++) if (keep[i]) out.push(pts[i]);
+  return out;
+}
+
+function simplifyByPass(pts, per, eps) {
+  // Each pass is simplified on its own. Running RDP across the whole path
+  // would let it cut a corner between the end of one pass and the start of
+  // the next, which is exactly where the family structure lives.
+  if (eps <= 0 || per < 3) return pts;
+  const out = [];
+  for (let i = 0; i < pts.length; i += per)
+    out.push(...rdp(pts.slice(i, i + per), eps));
+  return out;
+}
+
+function passSpacing(pts, passes, per) {
+  // How far apart consecutive passes run. Against the nib this is the
+  // difference between visible hatching and a solid black band, which is the
+  // whole judgement in this kind of drawing and the one thing a hairline
+  // preview hides from you.
+  //
+  // Reported as the MEDIAN, not the minimum. Every one of these families
+  // crosses itself somewhere, so the minimum is always about zero and a
+  // warning built on it fires on every drawing and means nothing. The median
+  // is what sets the tone across the sheet.
+  if (passes < 2 || pts.length < per * 2) return null;
+  const gaps = [];
+  const step = Math.max(1, Math.floor(per / 40));
+  for (let k = 0; k + 1 < passes; k++) {
+    const a = k * per, b = (k + 1) * per;
+    if (b + per > pts.length) break;
+    for (let i = 0; i < per; i += step)
+      gaps.push(Math.hypot(pts[a+i][0] - pts[b+i][0], pts[a+i][1] - pts[b+i][1]));
+  }
+  if (!gaps.length) return null;
+  gaps.sort((x, y) => x - y);
+  return gaps[gaps.length >> 1];
+}
+
 /* ------------------------------------------------------------------ render */
 
 let CUR = null;
@@ -543,7 +619,7 @@ function applyPreset(name) {
 }
 
 function render() {
-  for (const id of ["sweep","passes","samples","turns","skip","margin","speed",
+  for (const id of ["sweep","passes","samples","turns","skip","margin","speed","nib","simp",
                     "penDown","penUp","kp","ki","kd","umax","delay","q1","q2",
                     "rw","delay2","ws","wr","dt","cr","coff","cdec","cturn",
                     "casp","coffd"]) {
@@ -560,6 +636,15 @@ function render() {
   const raw = generate();
   if (!raw.length) { CUR = null; return; }
   const fit = fitToPaper(raw);
+
+  const nib = +$("nib").value;
+  const mode = $("mode").value;
+  const per = mode === "epi" || mode === "circ"
+            ? (+$("samples").value + 1) : null;   // points per pass
+  const before = fit.pts.length;
+  const gap = per ? passSpacing(fit.pts, +$("passes").value, per) : null;
+  if (per) fit.pts = simplifyByPass(fit.pts, per, nib * +$("simp").value);
+  fit.nib = nib;
   CUR = fit;
 
   const cv = $("cv"), g = cv.getContext("2d");
@@ -572,8 +657,12 @@ function render() {
   g.beginPath();
   fit.pts.forEach((p,i) => { const X = ox+p[0]*sc, Y = oy+p[1]*sc;
                              i ? g.lineTo(X,Y) : g.moveTo(X,Y); });
-  g.strokeStyle = "rgba(16,16,20,0.72)";
-  g.lineWidth = 0.32; g.lineJoin = "round"; g.stroke();
+  // Stroke at the real nib width so the preview shows whether the family
+  // stays as separate lines or fills in solid. A hairline always looks good.
+  g.strokeStyle = "rgba(16,16,20,0.78)";
+  g.lineWidth = Math.max(0.35, nib * sc);
+  g.lineJoin = g.lineCap = "round";
+  g.stroke();
 
   let len = 0;
   for (let i = 1; i < fit.pts.length; i++)
@@ -584,11 +673,23 @@ function render() {
   $("sEst").textContent = est > 3600 ? (est/3600).toFixed(1)+" h"
                         : est > 90 ? Math.round(est/60)+" min" : Math.round(est)+" s";
   $("sSize").textContent = Math.round(fit.w) + " x " + Math.round(fit.h);
+  $("sKept").textContent = before === fit.pts.length ? "all"
+    : `${fit.pts.length} of ${before}`;
+  $("sGap").textContent = gap === null ? "n/a" : gap.toFixed(2) + " mm";
+
+  if (gap !== null && gap < nib && !$("status").classList.contains("running")) {
+    $("sGap").style.color = "var(--bad)";
+    setStatus("error", `Passes sit ${gap.toFixed(2)} mm apart on average and ` +
+      `the nib is ${nib} mm, so most of this will fill in solid. Fewer passes, ` +
+      `a wider sweep, or a finer pen.`);
+  } else {
+    $("sGap").style.color = "";
+  }
 }
 
 /* ------------------------------------------------------------------ plotter */
 
-const payload = () => ({ points: CUR.pts, model: +$("model").value,
+const payload = () => ({ points: CUR.pts, nib: CUR.nib, model: +$("model").value,
   speed: +$("speed").value, pen_up: +$("penUp").value,
   pen_down: +$("penDown").value, preview: $("prev").checked });
 
@@ -650,7 +751,7 @@ async function poll() {
 function downloadSvg() {
   const f = CUR;
   const d = "M" + f.pts.map(p => `${p[0].toFixed(2)},${p[1].toFixed(2)}`).join(" L");
-  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${f.pw}mm" height="${f.ph}mm" viewBox="0 0 ${f.pw} ${f.ph}"><path d="${d}" fill="none" stroke="black" stroke-width="0.25"/></svg>`;
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${f.pw}mm" height="${f.ph}mm" viewBox="0 0 ${f.pw} ${f.ph}"><path d="${d}" fill="none" stroke="black" stroke-width="${f.nib || 0.25}" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
   const url = URL.createObjectURL(new Blob([svg], { type: "image/svg+xml" }));
   const a = document.createElement("a");
   a.href = url;
@@ -695,7 +796,7 @@ let DEMO = false;
   $("preset").addEventListener("change", e => applyPreset(e.target.value));
   ["sweep","passes","samples","turns","skip","margin","speed","penDown","penUp",
    "kp","ki","kd","umax","delay","q1","q2","rw","delay2","ws","wr","dt",
-   "cr","coff","cdec","cturn","casp","coffd",
+   "cr","coff","cdec","cturn","casp","coffd","nib","simp",
    "pw","ph","target","model","ff","rot90"].forEach(id =>
      $(id).addEventListener("input", render));
   if (DEMO) {

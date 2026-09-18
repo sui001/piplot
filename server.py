@@ -27,7 +27,7 @@ from flask import Flask, jsonify, request, send_from_directory
 
 from pen_box import MODELS  # noqa: E402  the machine travel envelopes
 
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DOCS = os.path.join(HERE, "docs")
@@ -46,6 +46,7 @@ class Job:
         self.done = 0
         self.total = 0
         self.started = 0.0
+        self.estimate_s = 0.0
 
     def snapshot(self) -> dict:
         elapsed = time.time() - self.started if self.started else 0.0
@@ -63,6 +64,21 @@ class Job:
 
 
 job = Job()
+
+
+def _progress_by_time():
+    """Advance the progress figure while draw_path has the machine.
+
+    draw_path gives no per-segment callback, so this walks the counter
+    forward against elapsed time instead. It is a readout, not a measurement,
+    and it stops short of 99% so it never claims to be finished early.
+    """
+    while job.state == "running" and not job.stop.is_set():
+        est = getattr(job, "estimate_s", 0) or 0
+        if est > 0 and job.total:
+            frac = min(0.99, (time.time() - job.started) / est)
+            job.done = max(job.done, int(frac * job.total))
+        time.sleep(2)
 
 
 def path_length(points) -> float:
@@ -101,7 +117,7 @@ def check_claims(points, model: int) -> tuple[bool, list]:
     return bool(ok), out
 
 
-def plot_worker(points, model, speed, pen_up, pen_down, preview):
+def plot_worker(points, model, speed, pen_up, pen_down, preview, accel=75):
     from pyaxidraw import axidraw
 
     ad = axidraw.AxiDraw()
@@ -114,6 +130,7 @@ def plot_worker(points, model, speed, pen_up, pen_down, preview):
         o.speed_penup = 75
         o.pen_pos_up = pen_up
         o.pen_pos_down = pen_down
+        o.accel = accel
 
         if not ad.connect():
             job.state, job.message = "error", "no AxiDraw found on the USB port"
@@ -136,15 +153,24 @@ def plot_worker(points, model, speed, pen_up, pen_down, preview):
                 ad.moveto(x, y)
 
         if not job.stop.is_set():
+            # One planned move for the whole path. Drawing it segment by
+            # segment with lineto plans each move on its own, so the machine
+            # accelerates from rest and stops again for every segment: a
+            # 57,000 segment path stops 57,000 times, which is the jerkiness.
+            #
+            # draw_path raises the pen when it returns, so it cannot be split
+            # into chunks to poll the stop flag without stamping a pen lift at
+            # every boundary. The driver takes the Event itself instead.
             job.message = "drawing"
-            ad.moveto(points[0][0], points[0][1])
-            ad.pendown()
-            for i, (x, y) in enumerate(points[1:], start=1):
-                if job.stop.is_set():
-                    break
-                ad.lineto(x, y)
-                job.done = i
-            ad.penup()
+            ad.set_up_pause_receiver(job.stop)
+            vertices = [[float(x), float(y)] for x, y in points]
+            # No per-segment callback exists, so progress is reported against
+            # the driver's own time estimate. It is an estimate, and says so.
+            job.estimate_s = ad.time_estimate if hasattr(ad, "time_estimate") else 0
+            prog = threading.Thread(target=_progress_by_time, daemon=True)
+            prog.start()
+            ad.draw_path(vertices)
+            job.done = job.total
 
         job.message = "returning home"
         ad.moveto(0, 0)
@@ -238,7 +264,7 @@ def plot():
             target=plot_worker,
             args=(points, model, int(body.get("speed", 25)),
                   int(body.get("pen_up", 60)), int(body.get("pen_down", 40)),
-                  bool(body.get("preview", True))),
+                  bool(body.get("preview", True)), int(body.get("accel", 75))),
             daemon=True)
         job.thread.start()
     return jsonify({"ok": True, "message": "plotting", "segments": job.total})
