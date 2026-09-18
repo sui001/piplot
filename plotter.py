@@ -125,7 +125,9 @@ class AxiDraw(Plotter):
         o.accel = self.opts["accel"]
         o.const_speed = self.opts["const_speed"]
         if self.opts["port"]:
+            # port_config must be 1 or the named port is ignored.
             o.port = self.opts["port"]
+            o.port_config = 1
         if not self.ad.connect():
             raise RuntimeError("no AxiDraw found; check the USB cable and that "
                                "nothing else holds the serial port")

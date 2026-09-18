@@ -86,7 +86,7 @@ def _progress_by_time():
     and it stops short of 99% so it never claims to be finished early.
     """
     while job.state == "running" and not job.stop.is_set():
-        est = getattr(job, "estimate_s", 0) or 0
+        est = job.estimate_s or 0
         if est > 0 and job.total:
             frac = min(0.99, (time.time() - job.started) / est)
             job.done = max(job.done, int(frac * job.total))
@@ -185,7 +185,10 @@ def plot_worker(points, model, speed, pen_up, pen_down, preview, accel=75,
         o.accel = accel
 
         if port:
+            # port_config must be 1 or the port is ignored and the driver
+            # autodetects anyway, which is what silently broke nicknames.
             o.port = port
+            o.port_config = 1
         if not ad.connect():
             job.state, job.message = "error", (
                 f"could not open {port}" if port else
@@ -223,7 +226,10 @@ def plot_worker(points, model, speed, pen_up, pen_down, preview, accel=75,
             vertices = [[float(x), float(y)] for x, y in points]
             # No per-segment callback exists, so progress is reported against
             # the driver's own time estimate. It is an estimate, and says so.
-            job.estimate_s = ad.time_estimate if hasattr(ad, "time_estimate") else 0
+            # ad.time_estimate is only populated after a plot, so it is
+            # useless for driving progress during one. Use the same length
+            # over speed figure that /api/check already reports.
+            job.estimate_s = path_length(points) / (2.18 * max(1, speed))
             prog = threading.Thread(target=_progress_by_time, daemon=True)
             prog.start()
             ad.draw_path(vertices)
