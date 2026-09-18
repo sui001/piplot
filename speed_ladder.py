@@ -45,12 +45,19 @@ DIGITS = {
 
 
 def label(text, x, y, h):
-    """Strokes for a short number, bottom-left at (x, y), height h."""
+    """Strokes for a short number, top-left at (x, y), height h.
+
+    The segment table is written in normal maths coordinates with y upward,
+    but the plotter draws with y increasing DOWN the page. Without flipping,
+    the top bar lands at the bottom and the digits come out mirrored: 2 reads
+    as 5, 6 reads as 9, which is worse than no label at all on a test sheet.
+    """
     w, gap, out = h * 0.55, h * 0.22, []
     for ch in text:
         for s in DIGITS.get(ch, ""):
             (ax, ay), (bx, by) = SEG[s]
-            out.append([(x + ax * w, y + ay * h), (x + bx * w, y + by * h)])
+            out.append([(x + ax * w, y + (1 - ay) * h),
+                        (x + bx * w, y + (1 - by) * h)])
         x += w + gap
     return out
 
