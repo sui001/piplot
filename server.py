@@ -27,6 +27,7 @@ import time
 from flask import Flask, jsonify, request, send_from_directory
 
 from pen_box import MODELS  # noqa: E402  the machine travel envelopes
+from portlock import hold  # noqa: E402  one thing at a time on a port
 
 VERSION = "0.5.0"
 
@@ -150,21 +151,28 @@ def list_boards():
         if (p.vid, p.pid) != EBB_VID_PID:
             continue
         nickname = ""
-        if not job.holds_port(p.device):
+        busy = job.holds_port(p.device)
+        # Probing opens the port, which kills whatever is drawing on it, so
+        # only ask a board its name when nothing else has claimed it.
+        if not busy:
             try:
-                with serial.Serial(p.device, 9600, timeout=1.5) as sp:
-                    time.sleep(0.15)
-                    sp.reset_input_buffer()
-                    sp.write(b"QT\r")
-                    time.sleep(0.3)
-                    reply = sp.read(100).decode(errors="replace").strip()
-                    first = reply.splitlines()[0].strip() if reply else ""
-                    # A board with no nickname answers with a bare OK.
-                    nickname = "" if first in ("", "OK") else first
+                with hold(p.device) as got:
+                    if not got:
+                        raise RuntimeError("in use")
+                    with serial.Serial(p.device, 9600, timeout=1.5) as sp:
+                        time.sleep(0.15)
+                        sp.reset_input_buffer()
+                        sp.write(b"QT\r")
+                        time.sleep(0.3)
+                        reply = sp.read(100).decode(errors="replace").strip()
+                        first = reply.splitlines()[0].strip() if reply else ""
+                        # A board with no nickname answers with a bare OK.
+                        nickname = "" if first in ("", "OK") else first
             except Exception:
                 nickname = ""
+                busy = True
         out.append({"device": p.device, "nickname": nickname,
-                    "busy": job.holds_port(p.device),
+                    "busy": busy,
                     "label": nickname or p.device})
     return out
 
@@ -187,11 +195,14 @@ def board_health(device):
         time.sleep(0.35)
         return sp.read(150).decode(errors="replace").strip()
 
-    with serial.Serial(device, 9600, timeout=2) as sp:
-        time.sleep(0.25)
-        qc = ask(sp, "QC").splitlines()[0]
-        qg = ask(sp, "QG").splitlines()[0]
-        ver = ask(sp, "V").splitlines()[0]
+    with hold(device) as got:
+        if not got:
+            raise RuntimeError("another process is using this board")
+        with serial.Serial(device, 9600, timeout=2) as sp:
+            time.sleep(0.25)
+            qc = ask(sp, "QC").splitlines()[0]
+            qg = ask(sp, "QG").splitlines()[0]
+            ver = ask(sp, "V").splitlines()[0]
     volts = int(qc.split(",")[1]) * ADC_VOLTS_PER_COUNT
     return {"volts": round(volts, 1), "qg": qg, "firmware": ver, "qc": qc}
 
@@ -256,7 +267,22 @@ def plot_worker(points, model, speed, pen_up, pen_down, preview, accel=75,
                 port=None):
     from pyaxidraw import axidraw
 
+    # Resolve a nickname to a device so the lock is on the same name a command
+    # line tool would use, then hold it for the whole plot.
+    device = port
+    for b in list_boards():
+        if port in (b["nickname"], b["device"]):
+            device = b["device"]
+            break
+
     ad = axidraw.AxiDraw()
+    lock = hold(device) if device else None
+    holder = lock.__enter__() if lock else True
+    if not holder:
+        job.state = "error"
+        job.message = (f"{port} is in use by something else. A command line "
+                       f"tool or another plot has it.")
+        return
     try:
         ad.interactive()
         o = ad.options
@@ -335,6 +361,9 @@ def plot_worker(points, model, speed, pen_up, pen_down, preview, accel=75,
             ad.disconnect()
         except Exception:
             pass
+    finally:
+        if lock:
+            lock.__exit__(None, None, None)
 
 
 @app.get("/")

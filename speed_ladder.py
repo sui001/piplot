@@ -28,6 +28,7 @@ import sys
 import time
 
 from pen_box import MODELS, Claims
+from portlock import hold
 
 VERSION = "0.1.0"
 
@@ -99,7 +100,12 @@ def main() -> int:
     p = argparse.ArgumentParser(description="plot one motif at several speeds and time each")
     p.add_argument("--speeds", default="25,40,55,70,85,100",
                    help="comma separated pen-down speed percentages")
-    p.add_argument("--accel", type=int, default=75)
+    p.add_argument("--accel", type=int, default=75,
+                   help="fixed acceleration, when laddering speed")
+    p.add_argument("--accels", default=None,
+                   help="ladder ACCELERATION instead of speed, comma separated")
+    p.add_argument("--speed", type=int, default=55,
+                   help="fixed pen-down speed, when laddering acceleration")
     p.add_argument("--model", type=int, default=2, choices=sorted(MODELS))
     p.add_argument("--paper", type=mm_pair, default=(420.0, 297.0))
     p.add_argument("--margin", type=float, default=18.0)
@@ -110,7 +116,17 @@ def main() -> int:
     p.add_argument("--dry", action="store_true", help="check and report, move nothing")
     args = p.parse_args()
 
-    speeds = [int(s) for s in args.speeds.split(",") if s.strip()]
+    # Acceleration is usually the control that changes the clock, since short
+    # segments never reach the commanded speed, so the same rig ladders either.
+    if args.accels:
+        vals = [int(v) for v in args.accels.split(",") if v.strip()]
+        cells_spec = [(v, args.speed, v) for v in vals]
+        varying = "accel"
+    else:
+        vals = [int(v) for v in args.speeds.split(",") if v.strip()]
+        cells_spec = [(v, v, args.accel) for v in vals]
+        varying = "speed"
+    speeds = vals
 
     print(f"=== piplot speed ladder v{VERSION} ===")
     print("Plots one motif at several speeds and times each, so the choice is measured")
@@ -129,27 +145,33 @@ def main() -> int:
     print(f"machine  model {args.model}, {name}, travel {tx:.0f} x {ty:.0f} mm")
     print(f"sheet    {pw:.0f} x {ph:.0f} mm, {cols} x {rows} cells of "
           f"{cw:.0f} x {ch:.0f} mm, motif {size:.0f} mm")
-    print(f"speeds   {', '.join(str(s) + '%' for s in speeds)}   accel {args.accel}")
+    if varying == "accel":
+        print(f"laddering ACCELERATION: {', '.join(str(v) for v in vals)}"
+              f"   at fixed speed {args.speed}%")
+    else:
+        print(f"laddering SPEED: {', '.join(str(v) + '%' for v in vals)}"
+              f"   at fixed accel {args.accel}")
     print()
 
     cells = []
-    for i, sp in enumerate(speeds):
+    for i, (shown, sp, ac) in enumerate(cells_spec):
         cx = args.margin + (i % cols) * cw + cw / 2
         cy = args.margin + (i // cols) * ch + ch / 2 + lab_h * 0.6
         paths = motif(cx, cy, size)
-        paths += label(f"{sp}", cx - size * 0.2, cy - size / 2 - lab_h * 1.5, lab_h)
-        cells.append((sp, paths))
+        paths += label(f"{shown}", cx - size * 0.2,
+                       cy - size / 2 - lab_h * 1.5, lab_h)
+        cells.append((shown, sp, ac, paths))
 
     c = Claims()
-    allpts = [pt for _, ps in cells for path in ps for pt in path]
+    allpts = [pt for *_, ps in cells for path in ps for pt in path]
     xs = [q[0] for q in allpts]
     ys = [q[1] for q in allpts]
     c.require("cells fit the travel envelope in x", min(xs) >= 0 and max(xs) <= tx,
               f"x spans {min(xs):.0f} to {max(xs):.0f} mm, machine has 0 to {tx:.0f}")
     c.require("cells fit the travel envelope in y", min(ys) >= 0 and max(ys) <= ty,
               f"y spans {min(ys):.0f} to {max(ys):.0f} mm, machine has 0 to {ty:.0f}")
-    c.require("every speed is a usable percentage",
-              all(1 <= s <= 100 for s in speeds))
+    c.require("every value is a usable percentage",
+              all(1 <= v <= 100 for v in vals))
     c.require("the motif is big enough to read", size >= 20.0, f"{size:.0f} mm")
     print()
 
@@ -157,12 +179,13 @@ def main() -> int:
         print("REFUSING TO MOVE.", file=sys.stderr)
         return 1
 
-    total = sum(len(path) for _, ps in cells for path in ps)
+    total = sum(len(path) for *_, ps in cells for path in ps)
     print(f"{len(cells)} cells, {total} points total")
     if args.dry:
-        for sp, ps in cells:
+        for shown, sp, ac, ps in cells:
             n = sum(len(x) for x in ps)
-            print(f"  {sp:3}%  {len(ps):3} paths  {n:5} points")
+            print(f"  {shown:3}  speed {sp:3}% accel {ac:3}  "
+                  f"{len(ps):3} paths  {n:5} points")
         print("\ndry run, nothing moved")
         return 0
 
@@ -173,43 +196,52 @@ def main() -> int:
     o = ad.options
     o.units = 2
     o.model = args.model
-    o.accel = args.accel
     o.pen_pos_down = args.pen_down
     o.pen_pos_up = args.pen_up
     o.speed_penup = 75
     if args.port:
         o.port = args.port
         o.port_config = 1      # without this the named port is ignored
+    device = args.port or ""
+    lock = hold(device)
+    if not lock.__enter__():
+        print(f"{device} is in use. The piplot server or another tool has it.",
+              file=sys.stderr)
+        return 1
+
     if not ad.connect():
+        lock.__exit__(None, None, None)
         print(f"could not connect to {args.port or 'any AxiDraw'}", file=sys.stderr)
         return 1
 
     results = []
     try:
-        for sp, paths in cells:
+        for shown, sp, ac, paths in cells:
             o.speed_pendown = sp
-            ad.update()          # speed changes only take effect after update
+            o.accel = ac
+            ad.update()          # options only take effect after update
             mm = sum(math.dist(path[i - 1], path[i])
                      for path in paths for i in range(1, len(path)))
-            print(f"  {sp:3}%  drawing {len(paths)} paths, {mm:.0f} mm ...",
+            print(f"  {shown:3}  (speed {sp}%, accel {ac})  {mm:.0f} mm ...",
                   end="", flush=True)
             t0 = time.time()
             for path in paths:
                 ad.draw_path([[float(x), float(y)] for x, y in path])
             dt = time.time() - t0
             print(f" {dt:5.1f}s   {mm / dt:5.1f} mm/s actual")
-            results.append((sp, mm, dt))
+            results.append((shown, mm, dt))
         ad.penup()
         ad.moveto(0, 0)
     finally:
         ad.disconnect()
+        lock.__exit__(None, None, None)
 
     print()
-    print("  speed   line mm   seconds   actual mm/s   vs 25%")
+    print(f"  {varying:6}  line mm   seconds   actual mm/s   vs first")
     print("  " + "-" * 50)
     base = results[0][2] if results else 1
-    for sp, mm, dt in results:
-        print(f"  {sp:4}%  {mm:8.0f}  {dt:8.1f}  {mm / dt:11.1f}   "
+    for shown, mm, dt in results:
+        print(f"  {shown:5}   {mm:8.0f}  {dt:8.1f}  {mm / dt:11.1f}   "
               f"{base / dt:5.2f}x")
     print()
     print("Now look at the sheet, not the table. The fastest cell that still")

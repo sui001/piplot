@@ -22,6 +22,8 @@ import argparse
 import sys
 import time
 
+from portlock import hold
+
 VERSION = "0.1.0"
 
 # pyaxidraw model number -> (travel x mm, travel y mm, name).
@@ -137,7 +139,14 @@ def main() -> int:
     o.pen_pos_down = args.pen_down
     o.pen_pos_up = args.pen_up
 
+    device = getattr(args, "port", None) or ""
+    lock = hold(device)
+    if not lock.__enter__():
+        print(f"{device} is in use by something else", file=sys.stderr)
+        return 1
+
     if not ad.connect():
+        lock.__exit__(None, None, None)
         print("no AxiDraw found", file=sys.stderr)
         return 1
     print("connected")
@@ -162,6 +171,7 @@ def main() -> int:
         ad.moveto(0, 0)
     finally:
         ad.disconnect()
+        lock.__exit__(None, None, None)
 
     print("done, pen up, carriage home")
     return 0
