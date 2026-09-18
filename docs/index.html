@@ -63,6 +63,8 @@
   #claims div { padding: 2px 0; font-weight: 500; }
   .ok::before { content: "ok  "; color: var(--good); font-weight: 700; }
   .no::before { content: "FAIL  "; color: var(--bad); font-weight: 700; }
+  #others { margin-top: 6px; font-size: 13px; font-weight: 600; color: #0C447C; }
+  #others:empty { display: none; }
   #status { margin-top: 10px; padding: 8px 10px; border-radius: 8px;
             background: #f5f3ee; font-size: 13px; font-weight: 500;
             border-left: 4px solid var(--line); }
@@ -244,6 +246,7 @@
     </div>
     <div id="claims"></div>
     <div id="status">idle</div>
+    <div id="others"></div>
   </div>
 </div>
 </main>
@@ -859,8 +862,13 @@ async function plot() {
 }
 
 async function stopPlot() {
-  try { await fetch("/api/stop", { method: "POST" }); }
-  catch (e) { setStatus("error", `could not reach the Pi: ${e}`); }
+  try {
+    const r = await fetch("/api/stop", { method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ port: $("board").value }) });
+    const d = await r.json();
+    if (!d.ok) setStatus("error", d.message);
+  } catch (e) { setStatus("error", `could not reach the Pi: ${e}`); }
 }
 
 async function refreshBoards() {
@@ -879,9 +887,12 @@ async function refreshBoards() {
       sel.innerHTML = '<option value="">none found</option>';
       return;
     }
+    // Rebuilding the options resets the selection, so carry it across.
+    const keep = sel.value;
     sel.innerHTML = (bs.length > 1 ? "" : '<option value="">auto</option>') +
       bs.map(b => `<option value="${b.nickname || b.device}">` +
         `${b.label}${b.busy ? " (busy)" : ""}</option>`).join("");
+    if ([...sel.options].some(o => o.value === keep)) sel.value = keep;
     if (bs.length > 1)
       setStatus("idle", `${bs.length} plotters attached. Pick which one to draw on.`);
   } catch (e) {
@@ -899,18 +910,26 @@ async function poll() {
   clearTimeout(pollTimer);
   let d = null;
   try {
-    d = await (await fetch("/api/status", { cache: "no-store" })).json();
+    const q = encodeURIComponent($("board").value || "");
+    d = await (await fetch(`/api/status?port=${q}`, { cache: "no-store" })).json();
   } catch (e) {
     pollTimer = setTimeout(poll, 3000);
     return;
   }
   const pct = d.total ? Math.round(100 * d.done / d.total) : 0;
   const left = d.remaining_s ? `, about ${Math.round(d.remaining_s / 60)} min left` : "";
+  const who = d.board ? `${d.board}: ` : "";
   setStatus(d.state, d.state === "running"
-    ? `${d.message}, ${pct}% (${d.done}/${d.total})${left}` : d.message);
+    ? `${who}${d.message}, ${pct}% (${d.done}/${d.total})${left}` : who + d.message);
+  // The other machines, so watching one never means losing track of the rest.
+  $("others").textContent = (d.others || []).map(o =>
+    `${o.board}: ${o.state}${o.state === "running" ? ` ${o.pct}%` : ""}` +
+    (o.remaining_s ? `, about ${Math.round(o.remaining_s / 60)} min left` : "")
+  ).join("   |   ");
+  const anyBusy = d.busy || (d.others || []).some(o => o.state === "running");
   // Keep a slow heartbeat when idle so a plot started from another tab, or
   // from the command line, still shows up here.
-  pollTimer = setTimeout(poll, d.busy ? 1200 : 5000);
+  pollTimer = setTimeout(poll, anyBusy ? 1200 : 5000);
 }
 
 function downloadSvg() {
@@ -981,6 +1000,7 @@ let DEMO = false;
       "Run server.py on a Pi wired to a plotter to draw it.");
   }
   await refreshBoards();
+  $("board").addEventListener("change", () => poll());
   $("bCheck").onclick = check;
   $("bPlot").onclick = plot;
   $("bStop").onclick = stopPlot;
