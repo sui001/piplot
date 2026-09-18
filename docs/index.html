@@ -1,0 +1,719 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>lyre plotter</title>
+<style>
+  :root {
+    --ink: #101014; --panel: #ffffff; --page: #eceae4;
+    --line: #c9c6bd; --accent: #1d4ed8; --good: #0f6e56; --bad: #a32d2d;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 15px/1.5 system-ui, -apple-system, sans-serif;
+         background: var(--page); color: var(--ink); }
+  header { background: var(--ink); color: #fff; padding: 10px 16px;
+           display: flex; gap: 16px; align-items: baseline; flex-wrap: wrap; }
+  header h1 { font-size: 17px; margin: 0; font-weight: 600; }
+  header .v { color: #7dd3fc; font-weight: 600; }
+  header .host { color: #fbbf24; font-weight: 600; }
+  main { display: grid; grid-template-columns: 340px 1fr; gap: 16px; padding: 16px;
+         align-items: start; }
+  @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
+  .panel { background: var(--panel); border: 1px solid var(--line);
+           border-radius: 10px; padding: 14px; }
+  .panel h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .08em;
+              margin: 0 0 10px; color: #444; }
+  .row { display: grid; grid-template-columns: 82px 1fr 62px; gap: 8px;
+         align-items: center; margin-bottom: 6px; }
+  .row label { font-size: 13px; font-weight: 500; }
+  .row output { font-variant-numeric: tabular-nums; font-size: 13px;
+                text-align: right; font-weight: 600; color: var(--accent); }
+  input[type=range] { width: 100%; }
+  select, input[type=number] { width: 100%; padding: 5px 6px; font: inherit;
+         border: 1px solid var(--line); border-radius: 6px; background: #fff; }
+  .terms { border-top: 1px solid var(--line); margin-top: 10px; padding-top: 10px; }
+  .term { display: grid; grid-template-columns: 20px repeat(3, 1fr); gap: 6px;
+          align-items: center; margin-bottom: 5px; }
+  .term span { font-weight: 700; color: #666; font-size: 12px; }
+  .term input { padding: 4px; font-size: 13px; }
+  .head { display: grid; grid-template-columns: 20px repeat(3, 1fr); gap: 6px;
+          font-size: 11px; color: #555; font-weight: 600; margin-bottom: 4px;
+          text-transform: uppercase; letter-spacing: .05em; }
+  canvas { background: #fff; border: 1px solid var(--line); border-radius: 8px;
+           width: 100%; height: auto; display: block; }
+  .bar { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+  button { font: inherit; font-weight: 600; padding: 8px 14px; border-radius: 8px;
+           border: 1px solid var(--ink); background: #fff; cursor: pointer; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.danger { background: var(--bad); border-color: var(--bad); color: #fff; }
+  button:disabled { opacity: .4; cursor: not-allowed; }
+  .stats { display: flex; gap: 18px; flex-wrap: wrap; margin-top: 10px;
+           font-size: 13px; font-variant-numeric: tabular-nums; }
+  .stats b { color: var(--accent); }
+  .poles { margin-top: 6px; font-size: 12.5px; color: #333; font-weight: 500;
+           font-variant-numeric: tabular-nums; }
+  .poles b { color: var(--good); }
+  #claims { margin-top: 10px; font-size: 13px; }
+  #claims div { padding: 2px 0; font-weight: 500; }
+  .ok::before { content: "ok  "; color: var(--good); font-weight: 700; }
+  .no::before { content: "FAIL  "; color: var(--bad); font-weight: 700; }
+  #status { margin-top: 10px; padding: 8px 10px; border-radius: 8px;
+            background: #f5f3ee; font-size: 13px; font-weight: 500;
+            border-left: 4px solid var(--line); }
+  #status.running { border-left-color: var(--accent); }
+  #status.done { border-left-color: var(--good); }
+  #status.error, #status.stopped { border-left-color: var(--bad); }
+  .hide { display: none; }
+  .note { font-size: 12.5px; color: #444; margin-top: 8px; line-height: 1.45; }
+</style>
+</head>
+<body>
+<header>
+  <h1>lyre plotter</h1>
+  <span class="v" id="ver">v?</span>
+  <span class="host" id="host"></span>
+  <span style="color:#d4d4d8">swept-family curve studio for pen plotters</span>
+  <span id="demoFlag" class="hide" style="color:#fca5a5;font-weight:600">demo, no plotter attached</span>
+</header>
+
+<main>
+<div>
+  <div class="panel">
+    <h2>generator</h2>
+    <div class="row"><label for="mode">mode</label>
+      <select id="mode" style="grid-column: 2 / span 2">
+        <option value="epi">epicycle, rotating vectors</option>
+        <option value="pid">pid, chasing a moving setpoint</option>
+        <option value="lqr">lqr, optimal gain</option>
+        <option value="circ">circles, rotate and decay</option>
+      </select></div>
+    <div class="row"><label for="preset">preset</label>
+      <select id="preset" style="grid-column: 2 / span 2"></select></div>
+
+    <div id="panEpi" class="terms">
+      <h2 style="margin-top:12px">base curve</h2>
+      <div class="head"><span></span><span>amp</span><span>freq</span><span>phase</span></div>
+      <div id="termsX"></div>
+      <div class="head" style="margin-top:8px"><span></span><span>amp</span><span>freq</span><span>phase</span></div>
+      <div id="termsY"></div>
+    </div>
+
+    <div id="panPid" class="terms hide">
+      <h2 style="margin-top:12px">controller</h2>
+      <div class="row"><label for="kp">Kp</label>
+        <input type="range" id="kp" min="0" max="60" step="0.05" value="12"><output id="kpV"></output></div>
+      <div class="row"><label for="ki">Ki</label>
+        <input type="range" id="ki" min="0" max="40" step="0.05" value="0"><output id="kiV"></output></div>
+      <div class="row"><label for="kd">Kd</label>
+        <input type="range" id="kd" min="0" max="12" step="0.01" value="0.4"><output id="kdV"></output></div>
+      <div class="row"><label for="umax">saturate</label>
+        <input type="range" id="umax" min="1" max="200" step="1" value="200"><output id="umaxV"></output></div>
+      <div class="row"><label for="delay">delay</label>
+        <input type="range" id="delay" min="0" max="40" step="1" value="0"><output id="delayV"></output></div>
+    </div>
+
+    <div id="panLqr" class="terms hide">
+      <h2 style="margin-top:12px">weights</h2>
+      <div class="row"><label for="q1">Q position</label>
+        <input type="range" id="q1" min="0.1" max="400" step="0.1" value="80"><output id="q1V"></output></div>
+      <div class="row"><label for="q2">Q velocity</label>
+        <input type="range" id="q2" min="0" max="60" step="0.05" value="0"><output id="q2V"></output></div>
+      <div class="row"><label for="rw">R effort</label>
+        <input type="range" id="rw" min="0.002" max="4" step="0.002" value="1"><output id="rwV"></output></div>
+      <div class="row"><label for="delay2">delay</label>
+        <input type="range" id="delay2" min="0" max="40" step="1" value="0"><output id="delay2V"></output></div>
+      <div class="poles" id="poles"></div>
+      <div class="note">With Q velocity at 0 the damping ratio is fixed at 0.707
+        whatever you do to the other two, so sweeping R only changes frequency.
+        Lift Q velocity to make damping move.</div>
+    </div>
+
+    <div id="panCirc" class="terms hide">
+      <h2 style="margin-top:12px">circle family</h2>
+      <div class="row"><label for="cr">radius</label>
+        <input type="range" id="cr" min="0.05" max="2" step="0.005" value="1"><output id="crV"></output></div>
+      <div class="row"><label for="coff">offset</label>
+        <input type="range" id="coff" min="0" max="2" step="0.005" value="0.62"><output id="coffV"></output></div>
+      <div class="row"><label for="cdec">decay</label>
+        <input type="range" id="cdec" min="-1" max="1" step="0.002" value="0.55"><output id="cdecV"></output></div>
+      <div class="row"><label for="cturn">rotation</label>
+        <input type="range" id="cturn" min="0.05" max="6" step="0.005" value="1"><output id="cturnV"></output></div>
+      <div class="row"><label for="casp">aspect</label>
+        <input type="range" id="casp" min="0.1" max="2.5" step="0.005" value="1"><output id="caspV"></output></div>
+      <div class="row"><label for="coffd">offset decay</label>
+        <input type="range" id="coffd" min="-1" max="1" step="0.002" value="0"><output id="coffdV"></output></div>
+      <div class="note">A circle turned about its own centre is unchanged, so
+        the rotation only bites once the circle is offset. Offset it, spin the
+        family and shrink it, and the envelope of the circles is a limacon.</div>
+    </div>
+
+    <div id="panPlant" class="terms hide">
+      <h2 style="margin-top:12px">setpoint</h2>
+      <div class="row"><label for="ws">orbit rate</label>
+        <input type="range" id="ws" min="0.05" max="12" step="0.01" value="2.1"><output id="wsV"></output></div>
+      <div class="row"><label for="wr">orbit ratio</label>
+        <input type="range" id="wr" min="0.25" max="6" step="0.005" value="1"><output id="wrV"></output></div>
+      <div class="row"><label for="dt">step</label>
+        <input type="range" id="dt" min="0.002" max="0.08" step="0.001" value="0.02"><output id="dtV"></output></div>
+      <div class="row"><label for="ff">feedforward</label>
+        <input type="checkbox" id="ff" style="justify-self:start"><output></output></div>
+    </div>
+
+    <div class="terms">
+      <h2 style="margin-top:12px">sweep</h2>
+      <div class="row"><label for="target">target</label>
+        <select id="target" style="grid-column: 2 / span 2"></select></div>
+      <div class="row"><label for="sweep">amount</label>
+        <input type="range" id="sweep" min="-4" max="4" step="0.002" value="0.18"><output id="sweepV"></output></div>
+      <div class="row"><label for="passes">passes</label>
+        <input type="range" id="passes" min="1" max="800" step="1" value="240"><output id="passesV"></output></div>
+      <div class="row"><label for="samples">pts/pass</label>
+        <input type="range" id="samples" min="12" max="900" step="1" value="120"><output id="samplesV"></output></div>
+      <div class="row"><label for="turns">turns</label>
+        <input type="range" id="turns" min="0.25" max="12" step="0.05" value="1"><output id="turnsV"></output></div>
+      <div class="row"><label for="skip">settle</label>
+        <input type="range" id="skip" min="0" max="90" step="1" value="0"><output id="skipV"></output></div>
+    </div>
+  </div>
+
+  <div class="panel" style="margin-top:14px">
+    <h2>paper and pen</h2>
+    <div class="row"><label for="model">machine</label>
+      <select id="model" style="grid-column: 2 / span 2"></select></div>
+    <div class="row"><label for="pw">paper</label>
+      <input type="number" id="pw" value="420" style="grid-column:2">
+      <input type="number" id="ph" value="297"></div>
+    <div class="row"><label for="margin">margin</label>
+      <input type="range" id="margin" min="0" max="60" step="1" value="20"><output id="marginV"></output></div>
+    <div class="row"><label for="rot90">rotate</label>
+      <input type="checkbox" id="rot90" style="justify-self:start"><output></output></div>
+    <div class="row"><label for="speed">speed</label>
+      <input type="range" id="speed" min="5" max="100" step="1" value="25"><output id="speedV"></output></div>
+    <div class="row"><label for="penDown">pen down</label>
+      <input type="range" id="penDown" min="0" max="100" step="1" value="40"><output id="penDownV"></output></div>
+    <div class="row"><label for="penUp">pen up</label>
+      <input type="range" id="penUp" min="0" max="100" step="1" value="60"><output id="penUpV"></output></div>
+    <div class="row"><label for="prev">pre-lap</label>
+      <input type="checkbox" id="prev" checked style="justify-self:start"><output></output></div>
+  </div>
+</div>
+
+<div>
+  <div class="panel">
+    <canvas id="cv" width="840" height="594"></canvas>
+    <div class="stats">
+      <span>points <b id="sPts">0</b></span>
+      <span>path <b id="sLen">0</b> mm</span>
+      <span>est <b id="sEst">0</b></span>
+      <span>size <b id="sSize">0</b> mm</span>
+    </div>
+    <div class="bar">
+      <button id="bCheck">check on machine</button>
+      <button id="bPlot" class="primary">plot it</button>
+      <button id="bStop" class="danger" disabled>stop</button>
+      <button id="bSvg">download svg</button>
+    </div>
+    <div id="claims"></div>
+    <div id="status">idle</div>
+  </div>
+</div>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+const TAU = Math.PI * 2;
+let TX = [], TY = [];
+
+/* ---------------------------------------------------------------- presets */
+
+const PRESETS = {
+  epi: {
+    snail:  { x:[[1,1,0],[0.62,2,0.4],[0,0,0]], y:[[1,1,0],[0.62,2,1.2],[0,0,0]],
+              target:"phase", sweep:0.18, passes:240, samples:120, turns:1 },
+    // After Kerry Strand's "The Snail" (1968), not a reconstruction of it.
+    // Strand's own equations are not something we have, so this is arrived at
+    // from the structure of the image: a limacon, swept in phase.
+    // "Limacon" is French for snail, and Pascal's limacon r = b + a cos t is
+    // the curve with the inner loop. Expanded it is exactly a two-term
+    // epicycle at frequencies 1 and 2, which is why it drops straight into
+    // this engine. Sweeping the phase of x1 slides the lobes past each other
+    // and the envelope of that family is the drawing.
+    strand: { x:[[1,1,0],[0.9,2,0],[0,0,0]], y:[[1,1,0],[0.9,2,0],[0,0,0]],
+              target:"phase", sweep:0.5, passes:190, samples:320, turns:1,
+              margin:16, rot90:true },
+    spiro:  { x:[[1,1,0],[0.55,7,0],[0,0,0]], y:[[1,1,0],[0.55,7,1.5708],[0,0,0]],
+              target:"rot", sweep:0.9, passes:60, samples:260, turns:1 },
+    harmo:  { x:[[1,2,0],[0.5,3.01,1.1],[0,0,0]], y:[[1,3,0.4],[0.5,2.02,0],[0,0,0]],
+              target:"phase", sweep:0.05, passes:120, samples:200, turns:1 },
+    lens:   { x:[[1,1,0],[0.9,3,0],[0,0,0]], y:[[1,1,1.5708],[0.35,3,0],[0,0,0]],
+              target:"freq", sweep:0.06, passes:300, samples:90, turns:1 },
+  },
+  pid: {
+    ring:    { kp:14, ki:0, kd:0.55, umax:200, delay:0, ws:2.1, wr:1, dt:0.02, ff:false,
+               target:"kp", sweep:0.55, passes:200, samples:220, turns:1, skip:25 },
+    windup:  { kp:22, ki:9, kd:0.5, umax:22, delay:0, ws:1.7, wr:1, dt:0.02, ff:false,
+               target:"ki", sweep:1.4, passes:220, samples:260, turns:1, skip:15 },
+    laggy:   { kp:18, ki:0, kd:0.7, umax:200, delay:6, ws:2.4, wr:1, dt:0.02, ff:false,
+               target:"delay", sweep:2.2, passes:260, samples:240, turns:1, skip:20 },
+    rosette: { kp:30, ki:0, kd:0.35, umax:200, delay:0, ws:3.2, wr:1.5, dt:0.015, ff:false,
+               target:"wr", sweep:0.12, passes:300, samples:200, turns:1, skip:20 },
+  },
+  circ: {
+    shell:  { cr:1, coff:0.62, cdec:0.55, cturn:1, casp:1, coffd:0,
+              target:"none", sweep:0, passes:220, samples:260, margin:16, rot90:true },
+    // Closest thing here to Kerry Strand's The Snail (1968). Arrived at as a
+    // construction rather than a formula: a circle, offset from the centre it
+    // turns about, stepped in rotation and shrunk a little each pass. Under
+    // half a turn is what keeps it asymmetric; a full turn closes it into an
+    // annulus and the two lobes disappear.
+    strand: { cr:1, coff:0.95, cdec:0.5, cturn:0.42, casp:1, coffd:0.15,
+              target:"none", sweep:0, passes:200, samples:300, margin:16, rot90:true },
+    horn:   { cr:1, coff:1.1, cdec:0.8, cturn:1.6, casp:0.8, coffd:0.55,
+              target:"none", sweep:0, passes:260, samples:240, margin:16, rot90:true },
+    annulus:{ cr:1, coff:0.35, cdec:0, cturn:1, casp:1, coffd:0,
+              target:"none", sweep:0, passes:160, samples:300, margin:16, rot90:false },
+  },
+  lqr: {
+    locus:   { q1:80, q2:0, rw:1, delay2:0, ws:2.2, wr:1, dt:0.02, ff:false,
+               target:"rw", sweep:-0.9, passes:260, samples:220, turns:1, skip:20 },
+    damping: { q1:140, q2:6, rw:0.6, delay2:0, ws:2.6, wr:1, dt:0.02, ff:false,
+               target:"q2", sweep:2.6, passes:280, samples:220, turns:1, skip:20 },
+    cheap:   { q1:200, q2:0.5, rw:0.05, delay2:3, ws:3.0, wr:1, dt:0.015, ff:true,
+               target:"rw", sweep:3.0, passes:240, samples:260, turns:1, skip:25 },
+  },
+};
+
+const TARGETS = {
+  epi: [["phase","phase of x1"],["freq","frequency of y1"],["amp","amplitude of x2"],
+        ["rot","rotation"],["scale","scale"]],
+  pid: [["kp","Kp"],["ki","Ki"],["kd","Kd"],["delay","loop delay"],
+        ["ws","orbit rate"],["wr","orbit ratio"],["umax","saturation"]],
+  lqr: [["rw","R, effort weight"],["q1","Q position"],["q2","Q velocity"],
+        ["delay","loop delay"],["ws","orbit rate"],["wr","orbit ratio"]],
+  circ: [["none","nothing, decay is the sweep"],["casp","aspect"],
+         ["coff","offset"],["cr","radius"],["spin","extra spin"]],
+};
+
+/* ------------------------------------------------------------ epicycle gen */
+
+function buildTerms() {
+  for (const [host, store] of [["termsX", TX], ["termsY", TY]]) {
+    const el = $(host); el.innerHTML = "";
+    for (let i = 0; i < 3; i++) {
+      const row = document.createElement("div");
+      row.className = "term";
+      row.innerHTML = `<span>${host === "termsX" ? "x" : "y"}${i+1}</span>` +
+        [0,1,2].map(j => `<input type="number" step="0.01" data-i="${i}" data-j="${j}">`).join("");
+      el.appendChild(row);
+      store[i] = [...row.querySelectorAll("input")];
+      store[i].forEach(inp => inp.addEventListener("input", render));
+    }
+  }
+}
+const readTerms = s => s.map(r => r.map(i => parseFloat(i.value) || 0));
+
+function genEpicycle(cfg) {
+  const bx = readTerms(TX), by = readTerms(TY);
+  const pts = [];
+  for (let k = 0; k < cfg.passes; k++) {
+    const s = cfg.passes > 1 ? k / (cfg.passes - 1) : 0;
+    const X = bx.map(t => t.slice()), Y = by.map(t => t.slice());
+    let rot = 0, scl = 1;
+    if (cfg.target === "phase") X[0][2] += s * cfg.sweep * TAU;
+    else if (cfg.target === "freq") Y[0][1] += s * cfg.sweep;
+    else if (cfg.target === "amp") X[1][0] *= (1 + s * cfg.sweep);
+    else if (cfg.target === "rot") rot = s * cfg.sweep * TAU;
+    else if (cfg.target === "scale") scl = 1 + s * cfg.sweep;
+    const cr = Math.cos(rot), sr = Math.sin(rot);
+    for (let n = 0; n <= cfg.samples; n++) {
+      const t = (n / cfg.samples) * TAU * cfg.turns;
+      let x = 0, y = 0;
+      for (const [A,f,p] of X) x += A * Math.cos(f*t + p);
+      for (const [B,g,q] of Y) y += B * Math.sin(g*t + q);
+      x *= scl; y *= scl;
+      pts.push([x*cr - y*sr, x*sr + y*cr]);
+    }
+  }
+  return pts;
+}
+
+/* ------------------------------------------------------------- circle gen */
+
+function genCircles(cfg) {
+  // Sui's construction, and probably Strand's: draw a circle, step the
+  // rotation, shrink it, repeat. The rotation only does anything because the
+  // circle is offset from the centre it turns about, and the envelope of a
+  // family of circles whose centres run round a circle is a limacon. Same
+  // curve as the epicycle route, reached as a mechanism instead of a formula.
+  const pts = [];
+  for (let k = 0; k < cfg.passes; k++) {
+    const s = cfg.passes > 1 ? k / (cfg.passes - 1) : 0;
+    const phi = s * cfg.cturn * TAU;
+    let r = cfg.cr * (1 - s * cfg.cdec);
+    let off = cfg.coff * (1 - s * cfg.coffd);
+    let asp = cfg.casp, spin = 0;
+    const f = 1 + s * cfg.sweep;
+    if (cfg.target === "casp") asp *= f;
+    else if (cfg.target === "coff") off *= f;
+    else if (cfg.target === "cr") r *= f;
+    else if (cfg.target === "spin") spin = s * cfg.sweep * TAU;
+
+    const cx = off * Math.cos(phi), cy = off * Math.sin(phi);
+    const cs = Math.cos(phi + spin), sn = Math.sin(phi + spin);
+    for (let n = 0; n <= cfg.samples; n++) {
+      const t = (n / cfg.samples) * TAU;
+      // The circle carries the family rotation too, which is what makes an
+      // ellipse behave differently from a circle here.
+      const ex = r * Math.cos(t), ey = r * asp * Math.sin(t);
+      pts.push([cx + ex*cs - ey*sn, cy + ex*sn + ey*cs]);
+    }
+  }
+  return pts;
+}
+
+/* ------------------------------------------------------------- control gen */
+
+function lqrGains(q1, q2, r) {
+  // Riccati for a double integrator solves in closed form:
+  //   K1 = sqrt(q1/r)      K2 = sqrt(2*sqrt(q1/r) + q2/r)
+  // With q2 = 0 this pins the damping ratio at 1/sqrt(2) no matter what q1
+  // and r do, so sweeping r slides the poles along a 45 degree ray and only
+  // the frequency moves. q2 is what lets damping vary.
+  const k1 = Math.sqrt(Math.max(q1, 0) / Math.max(r, 1e-9));
+  const k2 = Math.sqrt(2 * k1 + Math.max(q2, 0) / Math.max(r, 1e-9));
+  return [k1, k2];
+}
+
+function simulate(p) {
+  // Plant is a unit point mass per axis, a double integrator. The pen is the
+  // mass, not the setpoint: what gets drawn is the controller's pursuit of a
+  // target it never quite catches, which is where the shape comes from.
+  const n = p.steps, dt = p.dt;
+  const buf = [];               // delayed measurements, one entry per step
+  let px = p.x0, py = p.y0, vx = 0, vy = 0, ix = 0, iy = 0;
+  let ex_prev = 0, ey_prev = 0;
+  const out = [];
+  const skip = Math.floor(n * p.skip / 100);
+
+  for (let i = 0; i < n; i++) {
+    const t = i * dt;
+    const sx = Math.cos(p.ws * t), sy = Math.sin(p.ws * p.wr * t);
+
+    buf.push([px, py]);
+    const d = Math.min(p.delay, buf.length - 1);
+    const [mx, my] = buf[buf.length - 1 - d];
+
+    const ex = sx - mx, ey = sy - my;
+    let ux, uy;
+    if (p.kind === "lqr") {
+      // Full state feedback. Velocity term uses the measured rate, so a loop
+      // delay degrades it the same way it degrades the position term.
+      ux = p.k1 * ex - p.k2 * vx;
+      uy = p.k1 * ey - p.k2 * vy;
+    } else {
+      ix += ex * dt; iy += ey * dt;
+      ux = p.kp * ex + p.ki * ix + p.kd * (ex - ex_prev) / dt;
+      uy = p.kp * ey + p.ki * iy + p.kd * (ey - ey_prev) / dt;
+      ex_prev = ex; ey_prev = ey;
+    }
+    if (p.ff) { // feedforward the setpoint acceleration
+      ux += -p.ws * p.ws * sx;
+      uy += -(p.ws * p.wr) * (p.ws * p.wr) * sy;
+    }
+    const lim = p.umax;
+    ux = Math.max(-lim, Math.min(lim, ux));
+    uy = Math.max(-lim, Math.min(lim, uy));
+    // Clamping the integrator is the difference between graceful saturation
+    // and windup. Not clamping it is the more interesting drawing.
+    vx += ux * dt; vy += uy * dt;
+    px += vx * dt; py += vy * dt;
+
+    if (!Number.isFinite(px) || !Number.isFinite(py)) break;
+    if (i >= skip) out.push([px, py]);
+  }
+  return out;
+}
+
+function genControl(cfg, kind) {
+  const pts = [];
+  for (let k = 0; k < cfg.passes; k++) {
+    const s = cfg.passes > 1 ? k / (cfg.passes - 1) : 0;
+    const p = {
+      kind, dt: cfg.dt, steps: cfg.samples, skip: cfg.skip,
+      ws: cfg.ws, wr: cfg.wr, ff: cfg.ff, delay: cfg.delay,
+      kp: cfg.kp, ki: cfg.ki, kd: cfg.kd, umax: cfg.umax,
+      q1: cfg.q1, q2: cfg.q2, rw: cfg.rw,
+      x0: 0, y0: 0,
+    };
+    const f = 1 + s * cfg.sweep;
+    switch (cfg.target) {
+      case "kp": p.kp *= f; break;
+      case "ki": p.ki = p.ki * f + s * cfg.sweep; break;
+      case "kd": p.kd *= f; break;
+      case "umax": p.umax *= f; break;
+      case "ws": p.ws *= f; break;
+      case "wr": p.wr += s * cfg.sweep; break;
+      case "delay": p.delay = Math.round(p.delay + s * cfg.sweep * 10); break;
+      case "rw": p.rw *= Math.pow(10, s * cfg.sweep); break;
+      case "q1": p.q1 *= f; break;
+      case "q2": p.q2 = p.q2 * f + s * cfg.sweep; break;
+    }
+    p.delay = Math.max(0, Math.round(p.delay));
+    if (kind === "lqr") [p.k1, p.k2] = lqrGains(p.q1, p.q2, p.rw);
+    const run = simulate(p);
+    for (const q of run) pts.push(q);
+  }
+  return pts;
+}
+
+/* -------------------------------------------------------------- read + fit */
+
+function cfg() {
+  const num = id => +$(id).value;
+  return {
+    mode: $("mode").value, target: $("target").value,
+    sweep: num("sweep"), passes: num("passes"), samples: num("samples"),
+    turns: num("turns"), skip: num("skip"),
+    kp: num("kp"), ki: num("ki"), kd: num("kd"), umax: num("umax"),
+    cr: num("cr"), coff: num("coff"), cdec: num("cdec"), cturn: num("cturn"),
+    casp: num("casp"), coffd: num("coffd"),
+    delay: $("mode").value === "lqr" ? num("delay2") : num("delay"),
+    q1: num("q1"), q2: num("q2"), rw: num("rw"),
+    ws: num("ws"), wr: num("wr"), dt: num("dt"), ff: $("ff").checked,
+  };
+}
+
+function generate() {
+  const c = cfg();
+  if (c.mode === "epi") return genEpicycle(c);
+  if (c.mode === "circ") return genCircles(c);
+  return genControl(c, c.mode);
+}
+
+function fitToPaper(pts) {
+  const pw = +$("pw").value, ph = +$("ph").value, m = +$("margin").value;
+  if ($("rot90").checked) pts = pts.map(p => [p[1], -p[0]]);
+  const xs = pts.map(p => p[0]), ys = pts.map(p => p[1]);
+  const x0 = Math.min(...xs), x1 = Math.max(...xs);
+  const y0 = Math.min(...ys), y1 = Math.max(...ys);
+  const w = x1 - x0 || 1, h = y1 - y0 || 1;
+  const s = Math.min((pw - 2*m) / w, (ph - 2*m) / h);
+  const ox = (pw - w*s)/2, oy = (ph - h*s)/2;
+  return { pts: pts.map(p => [(p[0]-x0)*s + ox, (p[1]-y0)*s + oy]),
+           w: w*s, h: h*s, pw, ph };
+}
+
+/* ------------------------------------------------------------------ render */
+
+let CUR = null;
+
+function syncPanels() {
+  const m = $("mode").value;
+  $("panEpi").classList.toggle("hide", m !== "epi");
+  $("panPid").classList.toggle("hide", m !== "pid");
+  $("panLqr").classList.toggle("hide", m !== "lqr");
+  $("panCirc").classList.toggle("hide", m !== "circ");
+  $("panPlant").classList.toggle("hide", m === "epi" || m === "circ");
+
+  const cur = $("target").value;
+  $("target").innerHTML = TARGETS[m].map(([v,l]) => `<option value="${v}">${l}</option>`).join("");
+  if (TARGETS[m].some(([v]) => v === cur)) $("target").value = cur;
+
+  $("preset").innerHTML = Object.keys(PRESETS[m])
+    .map(k => `<option value="${k}">${k}</option>`).join("");
+}
+
+function applyPreset(name) {
+  const m = $("mode").value, p = PRESETS[m][name];
+  if (!p) return;
+  if (m === "epi") {
+    p.x.forEach((t,i) => t.forEach((v,j) => TX[i][j].value = v));
+    p.y.forEach((t,i) => t.forEach((v,j) => TY[i][j].value = v));
+  }
+  for (const [k,v] of Object.entries(p)) {
+    if (k === "x" || k === "y") continue;
+    const el = $(k === "delay" && m === "lqr" ? "delay2" : k);
+    if (!el) continue;
+    if (el.type === "checkbox") el.checked = !!v; else el.value = v;
+  }
+  if (p.target) $("target").value = p.target;
+  render();
+}
+
+function render() {
+  for (const id of ["sweep","passes","samples","turns","skip","margin","speed",
+                    "penDown","penUp","kp","ki","kd","umax","delay","q1","q2",
+                    "rw","delay2","ws","wr","dt","cr","coff","cdec","cturn",
+                    "casp","coffd"]) {
+    const o = $(id + "V"); if (o) o.textContent = $(id).value;
+  }
+  if ($("mode").value === "lqr") {
+    const [k1,k2] = lqrGains(+$("q1").value, +$("q2").value, +$("rw").value);
+    const wn = Math.sqrt(k1), z = k2 / (2 * Math.sqrt(k1));
+    $("poles").innerHTML = `K = [<b>${k1.toFixed(2)}</b>, <b>${k2.toFixed(2)}</b>] &nbsp; ` +
+      `wn <b>${wn.toFixed(2)}</b> &nbsp; zeta <b>${z.toFixed(3)}</b>` +
+      (z >= 1 ? " (overdamped)" : z < 0.3 ? " (ringing)" : "");
+  }
+
+  const raw = generate();
+  if (!raw.length) { CUR = null; return; }
+  const fit = fitToPaper(raw);
+  CUR = fit;
+
+  const cv = $("cv"), g = cv.getContext("2d");
+  const sc = Math.min(cv.width/fit.pw, cv.height/fit.ph);
+  const ox = (cv.width - fit.pw*sc)/2, oy = (cv.height - fit.ph*sc)/2;
+  g.clearRect(0,0,cv.width,cv.height);
+  g.fillStyle = "#fff"; g.fillRect(ox, oy, fit.pw*sc, fit.ph*sc);
+  g.strokeStyle = "#c9c6bd"; g.lineWidth = 1;
+  g.strokeRect(ox, oy, fit.pw*sc, fit.ph*sc);
+  g.beginPath();
+  fit.pts.forEach((p,i) => { const X = ox+p[0]*sc, Y = oy+p[1]*sc;
+                             i ? g.lineTo(X,Y) : g.moveTo(X,Y); });
+  g.strokeStyle = "rgba(16,16,20,0.72)";
+  g.lineWidth = 0.32; g.lineJoin = "round"; g.stroke();
+
+  let len = 0;
+  for (let i = 1; i < fit.pts.length; i++)
+    len += Math.hypot(fit.pts[i][0]-fit.pts[i-1][0], fit.pts[i][1]-fit.pts[i-1][1]);
+  const est = len / (2.18 * +$("speed").value);
+  $("sPts").textContent = fit.pts.length;
+  $("sLen").textContent = Math.round(len);
+  $("sEst").textContent = est > 3600 ? (est/3600).toFixed(1)+" h"
+                        : est > 90 ? Math.round(est/60)+" min" : Math.round(est)+" s";
+  $("sSize").textContent = Math.round(fit.w) + " x " + Math.round(fit.h);
+}
+
+/* ------------------------------------------------------------------ plotter */
+
+const payload = () => ({ points: CUR.pts, model: +$("model").value,
+  speed: +$("speed").value, pen_up: +$("penUp").value,
+  pen_down: +$("penDown").value, preview: $("prev").checked });
+
+const showClaims = cl => $("claims").innerHTML = (cl||[]).map(c =>
+  `<div class="${c.ok?"ok":"no"}">${c.label}${c.detail?"  ·  "+c.detail:""}</div>`).join("");
+
+function setStatus(state, msg) {
+  const el = $("status"); el.className = state; el.textContent = msg;
+  if (DEMO) return;
+  $("bStop").disabled = state !== "running";
+  $("bPlot").disabled = state === "running";
+}
+
+async function post(path) {
+  if (!CUR) { setStatus("error", "nothing generated yet"); return null; }
+  const body = JSON.stringify(payload());
+  const mb = (body.length / 1048576).toFixed(1);
+  setStatus("running", `sending ${CUR.pts.length} points (${mb} MB) to the Pi...`);
+  try {
+    const r = await fetch(path, { method: "POST",
+      headers: { "Content-Type": "application/json" }, body });
+    return await r.json();
+  } catch (e) {
+    setStatus("error", `could not reach the Pi: ${e}`);
+    return null;
+  }
+}
+
+async function check() {
+  const d = await post("/api/check");
+  if (!d) return;
+  showClaims(d.claims);
+  setStatus(d.ok ? "idle" : "error", d.ok
+    ? `fits the machine. ${d.segments} segments, ${d.length_mm} mm of line`
+    : "does not fit the machine, see above");
+}
+
+async function plot() {
+  const d = await post("/api/plot");
+  if (!d) return;
+  if (!d.ok) { showClaims(d.claims); setStatus("error", d.message); return; }
+  showClaims([]); poll();
+}
+
+async function stopPlot() {
+  try { await fetch("/api/stop", { method: "POST" }); }
+  catch (e) { setStatus("error", `could not reach the Pi: ${e}`); }
+}
+
+async function poll() {
+  const d = await (await fetch("/api/status")).json();
+  const pct = d.total ? Math.round(100*d.done/d.total) : 0;
+  const left = d.remaining_s ? `, about ${Math.round(d.remaining_s/60)} min left` : "";
+  setStatus(d.state, d.state === "running"
+    ? `${d.message}, ${pct}% (${d.done}/${d.total})${left}` : d.message);
+  if (d.busy) setTimeout(poll, 1200);
+}
+
+function downloadSvg() {
+  const f = CUR;
+  const d = "M" + f.pts.map(p => `${p[0].toFixed(2)},${p[1].toFixed(2)}`).join(" L");
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${f.pw}mm" height="${f.ph}mm" viewBox="0 0 ${f.pw} ${f.ph}"><path d="${d}" fill="none" stroke="black" stroke-width="0.25"/></svg>`;
+  const url = URL.createObjectURL(new Blob([svg], { type: "image/svg+xml" }));
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `lyre_${$("mode").value}_${$("preset").value}.svg`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  setStatus("done", `saved ${a.download}, ${CUR.pts.length} points`);
+}
+
+// The same file is served by server.py next to a real plotter and by GitHub
+// Pages with nothing behind it. Everything that makes a drawing runs in the
+// browser, so the only thing missing without a server is the plotting itself.
+const OFFLINE_MODELS = {
+  1:{name:"AxiDraw V2 / V3 / SE-A4",x:300,y:218}, 2:{name:"AxiDraw V3-A3 / SE-A3",x:430,y:297},
+  3:{name:"AxiDraw V3 XLX",x:595,y:218},          4:{name:"AxiDraw MiniKit",x:160,y:101},
+  5:{name:"AxiDraw SE-A1",x:864,y:594},           6:{name:"AxiDraw SE-A2",x:594,y:432},
+  7:{name:"AxiDraw V3-B6",x:180,y:140},           8:{name:"A1 plotter",x:841,y:594},
+  9:{name:"A0 plotter",x:1189,y:841},
+};
+let DEMO = false;
+
+(async function init() {
+  buildTerms();
+  let info;
+  try {
+    const r = await fetch("/api/info", { cache: "no-store" });
+    if (!r.ok) throw new Error("status " + r.status);
+    info = await r.json();
+  } catch (e) {
+    DEMO = true;
+    info = { version: "demo", host: "no plotter", models: OFFLINE_MODELS };
+  }
+  $("ver").textContent = "v" + info.version;
+  $("host").textContent = info.host;
+  $("model").innerHTML = Object.entries(info.models).map(([k,v]) =>
+    `<option value="${k}" ${k==="2"?"selected":""}>${v.name} (${v.x}x${v.y})</option>`).join("");
+  $("mode").addEventListener("change", () => {
+    syncPanels(); applyPreset($("preset").value = Object.keys(PRESETS[$("mode").value])[0]);
+  });
+  $("preset").addEventListener("change", e => applyPreset(e.target.value));
+  ["sweep","passes","samples","turns","skip","margin","speed","penDown","penUp",
+   "kp","ki","kd","umax","delay","q1","q2","rw","delay2","ws","wr","dt",
+   "cr","coff","cdec","cturn","casp","coffd",
+   "pw","ph","target","model","ff","rot90"].forEach(id =>
+     $(id).addEventListener("input", render));
+  if (DEMO) {
+    $("demoFlag").classList.remove("hide");
+    for (const b of ["bCheck","bPlot","bStop"]) {
+      $(b).disabled = true;
+      $(b).title = "needs a plotter and the piplot server";
+    }
+    setStatus("idle", "Demo mode: design a curve and download the svg. " +
+      "Run server.py on a Pi wired to a plotter to draw it.");
+  }
+  $("bCheck").onclick = check;
+  $("bPlot").onclick = plot;
+  $("bStop").onclick = stopPlot;
+  $("bSvg").onclick = downloadSvg;
+  syncPanels();
+  applyPreset("snail");
+  if (!DEMO) poll();
+})();
+</script>
+</body>
+</html>

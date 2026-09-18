@@ -1,0 +1,6 @@
+numpy>=1.24
+pyserial>=3.5
+flask>=2.3
+
+# AxiDraw driver, not on PyPI:
+#   pip install https://cdn.evilmadscientist.com/dl/ad/public/AxiDraw_API.zip
