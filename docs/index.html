@@ -29,6 +29,11 @@
   .row label { font-size: 13px; font-weight: 500; }
   .row output { font-variant-numeric: tabular-nums; font-size: 13px;
                 text-align: right; font-weight: 600; color: var(--accent); }
+  .numbox { font-variant-numeric: tabular-nums; font-size: 13px; font-weight: 600;
+            color: var(--accent); text-align: right; padding: 3px 4px;
+            border: 1px solid var(--line); border-radius: 5px; background: #fff;
+            width: 100%; }
+  .numbox:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
   input[type=range] { width: 100%; }
   select, input[type=number] { width: 100%; padding: 5px 6px; font: inherit;
          border: 1px solid var(--line); border-radius: 6px; background: #fff; }
@@ -76,6 +81,8 @@
   <span style="color:#d4d4d8">swept-family curve studio for pen plotters</span>
   <a href="import.html" style="color:#7dd3fc;font-weight:600">import artwork</a>
   <span id="demoFlag" class="hide" style="color:#fca5a5;font-weight:600">demo, no plotter attached</span>
+  <button id="stale" class="hide" style="margin-left:auto;background:#BA7517;
+    border-color:#BA7517;color:#fff;padding:5px 12px">newer version available, reload</button>
 </header>
 
 <main>
@@ -318,8 +325,9 @@ function buildTerms() {
     for (let i = 0; i < 3; i++) {
       const row = document.createElement("div");
       row.className = "term";
-      row.innerHTML = `<span>${host === "termsX" ? "x" : "y"}${i+1}</span>` +
-        [0,1,2].map(j => `<input type="number" step="0.01" data-i="${i}" data-j="${j}">`).join("");
+      const ax = host === "termsX" ? "x" : "y";
+      row.innerHTML = `<span>${ax}${i+1}</span>` +
+        [0,1,2].map(j => `<input type="number" step="0.01" id="t${ax}${i}_${j}">`).join("");
       el.appendChild(row);
       store[i] = [...row.querySelectorAll("input")];
       store[i].forEach(inp => inp.addEventListener("input", render));
@@ -509,14 +517,118 @@ function generate() {
 function fitToPaper(pts) {
   const pw = +$("pw").value, ph = +$("ph").value, m = +$("margin").value;
   if ($("rot90").checked) pts = pts.map(p => [p[1], -p[0]]);
-  const xs = pts.map(p => p[0]), ys = pts.map(p => p[1]);
-  const x0 = Math.min(...xs), x1 = Math.max(...xs);
-  const y0 = Math.min(...ys), y1 = Math.max(...ys);
+  // Spreading a big array into Math.min blows the call stack. These paths run
+  // to hundreds of thousands of points, so the bounds are walked, not spread.
+  let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
+  for (const [px, py] of pts) {
+    if (px < x0) x0 = px;
+    if (px > x1) x1 = px;
+    if (py < y0) y0 = py;
+    if (py > y1) y1 = py;
+  }
   const w = x1 - x0 || 1, h = y1 - y0 || 1;
   const s = Math.min((pw - 2*m) / w, (ph - 2*m) / h);
   const ox = (pw - w*s)/2, oy = (ph - h*s)/2;
   return { pts: pts.map(p => [(p[0]-x0)*s + ox, (p[1]-y0)*s + oy]),
            w: w*s, h: h*s, pw, ph };
+}
+
+/* ---------------------------------------------------------- number boxes */
+
+function addNumberBoxes() {
+  // Sliders are hopeless for an exact value. Each one gets a typeable box in
+  // place of its readout, and typing a number outside the slider's range
+  // widens the slider rather than clamping what was asked for: a slider limit
+  // is a guess about useful range, not a fact about the machine.
+  for (const r of document.querySelectorAll("input[type=range]")) {
+    const out = $(r.id + "V");
+    if (!out) continue;
+    const n = document.createElement("input");
+    n.type = "number";
+    n.id = r.id + "N";
+    n.className = "numbox";
+    n.step = r.step || "any";
+    n.value = r.value;
+    out.replaceWith(n);
+
+    r.addEventListener("input", () => { n.value = r.value; });
+    n.addEventListener("input", () => {
+      if (n.value === "" || isNaN(+n.value)) return;
+      const v = +n.value;
+      if (v < +r.min) r.min = v;
+      if (v > +r.max) r.max = v;
+      r.value = v;
+      r.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    n.addEventListener("change", saveSettings);
+  }
+}
+
+function syncNumberBoxes() {
+  for (const r of document.querySelectorAll("input[type=range]")) {
+    const n = $(r.id + "N");
+    if (!n) continue;
+    if (+r.value < +r.min) r.min = r.value;
+    if (+r.value > +r.max) r.max = r.value;
+    n.value = r.value;
+  }
+}
+
+/* ------------------------------------------------------- saved settings */
+
+const SKEY = "piplot.settings.v2";
+
+function controls() {
+  return [...document.querySelectorAll("main input[id], main select[id]")]
+    .filter(el => el.type !== "file" && !el.classList.contains("numbox"));
+}
+
+function saveSettings() {
+  // Every reload used to reset the panel, which is why getting a default
+  // wrong cost real time. localStorage can throw or come back empty in a
+  // private window, so nothing here is allowed to be load bearing.
+  try {
+    const d = {};
+    for (const el of controls())
+      d[el.id] = el.type === "checkbox" ? el.checked : el.value;
+    localStorage.setItem(SKEY, JSON.stringify(d));
+  } catch (e) { /* not worth breaking the page over */ }
+}
+
+function loadSettings() {
+  let d = null;
+  try { d = JSON.parse(localStorage.getItem(SKEY) || "null"); } catch (e) { d = null; }
+  if (!d) return false;
+  for (const el of controls()) {
+    if (!(el.id in d)) continue;
+    // A saved plotter that is no longer plugged in must not be restored.
+    if (el.tagName === "SELECT" && ![...el.options].some(o => o.value === d[el.id]))
+      continue;
+    if (el.type === "checkbox") el.checked = !!d[el.id];
+    else el.value = d[el.id];
+  }
+  return true;
+}
+
+function resetSettings() {
+  try { localStorage.removeItem(SKEY); } catch (e) {}
+  location.reload();
+}
+
+/* ----------------------------------------------------------- staleness */
+
+let LOADED = null;
+
+async function checkFresh() {
+  // Compares both the server version and a hash of the page itself, so a
+  // deploy that only touched the html is caught as well as a restart.
+  if (DEMO) return;
+  try {
+    const i = await (await fetch("/api/info", { cache: "no-store" })).json();
+    if (!LOADED) { LOADED = i; return; }
+    const stale = i.version !== LOADED.version || i.page !== LOADED.page;
+    $("stale").classList.toggle("hide", !stale);
+  } catch (e) { /* offline, say nothing */ }
 }
 
 /* -------------------------------------------------------------- simplify */
@@ -557,7 +669,7 @@ function simplifyByPass(pts, per, eps) {
   if (eps <= 0 || per < 3) return pts;
   const out = [];
   for (let i = 0; i < pts.length; i += per)
-    out.push(...rdp(pts.slice(i, i + per), eps));
+    for (const q of rdp(pts.slice(i, i + per), eps)) out.push(q);
   return out;
 }
 
@@ -628,6 +740,7 @@ function render() {
                     "rw","delay2","ws","wr","dt","cr","coff","cdec","cturn",
                     "casp","coffd"]) {
     const o = $(id + "V"); if (o) o.textContent = $(id).value;
+    const n = $(id + "N"); if (n && document.activeElement !== n) n.value = $(id).value;
   }
   if ($("mode").value === "lqr") {
     const [k1,k2] = lqrGains(+$("q1").value, +$("q2").value, +$("rw").value);
@@ -817,7 +930,9 @@ let DEMO = false;
     DEMO = true;
     info = { version: "demo", host: "no plotter", models: OFFLINE_MODELS };
   }
-  $("ver").textContent = "v" + info.version;
+  LOADED = info;
+  $("ver").textContent = "v" + info.version + (info.page ? " / " + info.page : "");
+  $("ver").title = "server version / page hash. Amber button means reload.";
   $("host").textContent = info.host;
   $("model").innerHTML = Object.entries(info.models).map(([k,v]) =>
     `<option value="${k}" ${k==="2"?"selected":""}>${v.name} (${v.x}x${v.y})</option>`).join("");
@@ -825,6 +940,11 @@ let DEMO = false;
     syncPanels(); applyPreset($("preset").value = Object.keys(PRESETS[$("mode").value])[0]);
   });
   $("preset").addEventListener("change", e => applyPreset(e.target.value));
+  for (const el of controls())
+    el.addEventListener("change", saveSettings);
+  $("stale").onclick = () => location.reload();
+  setInterval(checkFresh, 20000);
+
   ["sweep","passes","samples","turns","skip","margin","speed","penDown","penUp",
    "kp","ki","kd","umax","delay","q1","q2","rw","delay2","ws","wr","dt",
    "cr","coff","cdec","cturn","casp","coffd","nib","simp",
@@ -845,7 +965,13 @@ let DEMO = false;
   $("bStop").onclick = stopPlot;
   $("bSvg").onclick = downloadSvg;
   syncPanels();
+  addNumberBoxes();
   applyPreset("snail");
+  // Saved values land last so they win over the preset, and the mode has to be
+  // restored before the panels are synced or the wrong controls are on screen.
+  if (loadSettings()) { syncPanels(); loadSettings(); }
+  syncNumberBoxes();
+  render();
   if (!DEMO) poll();
 })();
 </script>

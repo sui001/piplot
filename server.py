@@ -20,6 +20,7 @@ import math
 import os
 import subprocess
 import sys
+import hashlib
 import threading
 import time
 
@@ -341,10 +342,25 @@ def index():
     return send_from_directory(DOCS, "index.html")
 
 
+def page_stamp():
+    """A short hash of the page as it is on disk right now.
+
+    The server version only moves when server.py changes, so it cannot see a
+    deploy that only touched the page. This can, which is what lets the browser
+    notice it is running yesterday's javascript against today's server.
+    """
+    try:
+        with open(os.path.join(DOCS, "index.html"), "rb") as fh:
+            return hashlib.md5(fh.read()).hexdigest()[:8]
+    except OSError:
+        return "unknown"
+
+
 @app.get("/api/info")
 def info():
     return jsonify({
         "version": VERSION,
+        "page": page_stamp(),
         "models": {k: {"x": v[0], "y": v[1], "name": v[2]} for k, v in MODELS.items()},
         "host": os.uname().nodename,
     })
