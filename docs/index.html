@@ -208,6 +208,12 @@
       the motors, so this is what makes a plot smooth rather than jerky.</div>
     <div class="row"><label for="speed">speed</label>
       <input type="range" id="speed" min="5" max="100" step="1" value="25"><output id="speedV"></output></div>
+    <div class="row"><label for="accel">accel</label>
+      <input type="range" id="accel" min="1" max="100" step="1" value="75"><output id="accelV"></output></div>
+    <div class="note">Segments here average well under a millimetre, so the
+      machine spends most of a segment accelerating and never reaches the speed
+      above. Acceleration is usually the control that changes the time, and
+      speed the one that changes the line quality.</div>
     <div class="row"><label for="penDown">pen down</label>
       <input type="range" id="penDown" min="0" max="100" step="1" value="0"><output id="penDownV"></output></div>
     <div class="note">Defaults to 0, fully down, which is how this machine is
@@ -738,7 +744,7 @@ function render() {
   for (const id of ["sweep","passes","samples","turns","skip","margin","speed","nib","simp",
                     "penDown","penUp","kp","ki","kd","umax","delay","q1","q2",
                     "rw","delay2","ws","wr","dt","cr","coff","cdec","cturn",
-                    "casp","coffd"]) {
+                    "casp","coffd","accel"]) {
     const o = $(id + "V"); if (o) o.textContent = $(id).value;
     const n = $(id + "N"); if (n && document.activeElement !== n) n.value = $(id).value;
   }
@@ -807,7 +813,7 @@ function render() {
 /* ------------------------------------------------------------------ plotter */
 
 const payload = () => ({ points: CUR.pts, nib: CUR.nib, port: $("board").value,
-  model: +$("model").value,
+  model: +$("model").value, accel: +$("accel").value,
   speed: +$("speed").value, pen_up: +$("penUp").value,
   pen_down: +$("penDown").value, preview: $("prev").checked });
 
@@ -962,7 +968,7 @@ let DEMO = false;
 
   ["sweep","passes","samples","turns","skip","margin","speed","penDown","penUp",
    "kp","ki","kd","umax","delay","q1","q2","rw","delay2","ws","wr","dt",
-   "cr","coff","cdec","cturn","casp","coffd","nib","simp",
+   "cr","coff","cdec","cturn","casp","coffd","nib","simp","accel",
    "pw","ph","target","model","ff","rot90"].forEach(id =>
      $(id).addEventListener("input", render));
   if (DEMO) {
