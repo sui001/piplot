@@ -1,0 +1,1026 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>piplot import</title>
+<style>
+  :root {
+    --ink: #101014; --panel: #ffffff; --page: #eceae4;
+    --line: #c9c6bd; --accent: #1d4ed8; --good: #0f6e56; --bad: #a32d2d;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 15px/1.5 system-ui, -apple-system, sans-serif;
+         background: var(--page); color: var(--ink); }
+  header { background: var(--ink); color: #fff; padding: 10px 16px;
+           display: flex; gap: 16px; align-items: baseline; flex-wrap: wrap; }
+  header h1 { font-size: 17px; margin: 0; font-weight: 600; }
+  header .v { color: #7dd3fc; font-weight: 600; }
+  header .host { color: #fbbf24; font-weight: 600; }
+  header a { color: #7dd3fc; font-weight: 600; }
+  main { display: grid; grid-template-columns: 340px 1fr; gap: 16px; padding: 16px;
+         align-items: start; }
+  @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
+  .panel { background: var(--panel); border: 1px solid var(--line);
+           border-radius: 10px; padding: 14px; }
+  .panel h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .08em;
+              margin: 0 0 10px; color: #444; }
+  .row { display: grid; grid-template-columns: 82px 1fr 62px; gap: 8px;
+         align-items: center; margin-bottom: 6px; }
+  .row label { font-size: 13px; font-weight: 500; }
+  .row output { font-variant-numeric: tabular-nums; font-size: 13px;
+                text-align: right; font-weight: 600; color: var(--accent); }
+  input[type=range] { width: 100%; }
+  select, input[type=number], input[type=file], textarea {
+         width: 100%; padding: 5px 6px; font: inherit;
+         border: 1px solid var(--line); border-radius: 6px; background: #fff; }
+  textarea { font: 12px/1.45 ui-monospace, Menlo, Consolas, monospace;
+             resize: vertical; min-height: 84px; }
+  .terms { border-top: 1px solid var(--line); margin-top: 10px; padding-top: 10px; }
+  canvas { background: #fff; border: 1px solid var(--line); border-radius: 8px;
+           width: 100%; height: auto; display: block; }
+  .bar { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+  button { font: inherit; font-weight: 600; padding: 8px 14px; border-radius: 8px;
+           border: 1px solid var(--ink); background: #fff; cursor: pointer; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.danger { background: var(--bad); border-color: var(--bad); color: #fff; }
+  button:disabled { opacity: .4; cursor: not-allowed; }
+  .stats { display: flex; gap: 18px; flex-wrap: wrap; margin-top: 10px;
+           font-size: 13px; font-variant-numeric: tabular-nums; }
+  .stats b { color: var(--accent); }
+  .poles { margin-top: 6px; font-size: 12.5px; color: #333; font-weight: 500;
+           font-variant-numeric: tabular-nums; }
+  .poles b { color: var(--good); }
+  #claims { margin-top: 10px; font-size: 13px; }
+  #claims div { padding: 2px 0; font-weight: 500; }
+  .ok::before { content: "ok  "; color: var(--good); font-weight: 700; }
+  .no::before { content: "FAIL  "; color: var(--bad); font-weight: 700; }
+  #status { margin-top: 10px; padding: 8px 10px; border-radius: 8px;
+            background: #f5f3ee; font-size: 13px; font-weight: 500;
+            border-left: 4px solid var(--line); }
+  #status.running { border-left-color: var(--accent); }
+  #status.done { border-left-color: var(--good); }
+  #status.error, #status.stopped { border-left-color: var(--bad); }
+  .hide { display: none; }
+  .note { font-size: 12.5px; color: #444; margin-top: 8px; line-height: 1.45; }
+  .note code { background: #f1efe9; padding: 1px 4px; border-radius: 4px;
+               font-size: 12px; color: #1d4ed8; font-weight: 600; }
+  .warn { margin-top: 10px; padding: 8px 10px; border-radius: 8px;
+          background: #fdf1f1; border-left: 4px solid var(--bad);
+          font-size: 13px; font-weight: 600; color: var(--bad); }
+</style>
+</head>
+<body>
+<header>
+  <h1>piplot import</h1>
+  <span class="v" id="ver">v?</span>
+  <span class="host" id="host"></span>
+  <span style="color:#d4d4d8">turn artwork into a plottable path</span>
+  <a href="index.html">curve studio</a>
+  <span id="demoFlag" class="hide" style="color:#fca5a5;font-weight:600">demo, no plotter attached</span>
+</header>
+
+<main>
+<div>
+  <div class="panel">
+    <h2>source</h2>
+    <div class="row"><label for="src">kind</label>
+      <select id="src" style="grid-column: 2 / span 2">
+        <option value="svg">svg, paths and shapes</option>
+        <option value="json">json, points</option>
+        <option value="img">raster image, interpreted</option>
+      </select></div>
+    <div class="row"><label for="file">file</label>
+      <input type="file" id="file" style="grid-column: 2 / span 2"></div>
+
+    <div id="panSvg" class="terms">
+      <div class="row"><label for="tol">tolerance</label>
+        <input type="range" id="tol" min="0.02" max="1" step="0.01" value="0.1"><output id="tolV"></output></div>
+      <div class="row"><label for="minlen">drop under</label>
+        <input type="range" id="minlen" min="0" max="10" step="0.1" value="0"><output id="minlenV"></output></div>
+      <textarea id="svgText" spellcheck="false"></textarea>
+      <div class="note">Curves are flattened until no control point sits further
+        than the tolerance, in finished millimetres on the paper, from the chord
+        that replaces it. <code>path polyline polygon line rect circle
+        ellipse</code> are read, and <code>transform</code> is honoured on every
+        ancestor. Outlines only: fills, strokes, <code>use</code>, clipping and
+        text are ignored, so convert text to paths first. Drop under removes
+        paths shorter than that many millimetres, which is how you lose the
+        stray two-point crumbs a trace leaves behind.</div>
+    </div>
+
+    <div id="panJson" class="terms hide">
+      <textarea id="jsonText" spellcheck="false"></textarea>
+      <div class="note">Either one path, <code>[[x,y],[x,y],...]</code>, or
+        several, <code>[[[x,y],...],[[x,y],...]]</code>. Any units at all: the
+        result is fitted to the paper, so only the shape and the aspect ratio
+        survive. y is taken as pointing down, the same way the plotter reads it.</div>
+    </div>
+
+    <div id="panImg" class="terms hide">
+      <div class="row"><label for="imode">method</label>
+        <select id="imode" style="grid-column: 2 / span 2">
+          <option value="spiral">spiral halftone, one path</option>
+          <option value="wave">hatch wave, one path</option>
+          <option value="lines">hatch lines, one per run of tone</option>
+        </select></div>
+      <div class="row"><label for="spacing">spacing</label>
+        <input type="range" id="spacing" min="2" max="40" step="0.5" value="9"><output id="spacingV"></output></div>
+      <div class="row"><label for="amount">amplitude</label>
+        <input type="range" id="amount" min="0" max="2" step="0.02" value="1"><output id="amountV"></output></div>
+      <div class="row"><label for="wave">wavelength</label>
+        <input type="range" id="wave" min="2" max="40" step="0.5" value="7"><output id="waveV"></output></div>
+      <div class="row"><label for="angle">angle</label>
+        <input type="range" id="angle" min="0" max="180" step="1" value="45"><output id="angleV"></output></div>
+      <div class="row"><label for="gamma">tone</label>
+        <input type="range" id="gamma" min="0.2" max="4" step="0.05" value="1"><output id="gammaV"></output></div>
+      <div class="row"><label for="thresh">threshold</label>
+        <input type="range" id="thresh" min="0" max="1" step="0.01" value="0.6"><output id="threshV"></output></div>
+      <div class="row"><label for="cover">cover</label>
+        <input type="range" id="cover" min="0.3" max="1.45" step="0.01" value="1"><output id="coverV"></output></div>
+      <div class="row"><label for="invert">invert</label>
+        <input type="checkbox" id="invert" style="justify-self:start"><output></output></div>
+      <div class="note">A raster cannot be imported, only interpreted: there are
+        no paths in a photograph, so one gets invented and the controls decide
+        which. <b>Spiral</b> is one Archimedean spiral whose radius wobbles by
+        the local darkness, which is the best of these on a plotter because it
+        never lifts the pen. <b>Hatch wave</b> is the same idea on parallel rows
+        joined end to end. <b>Hatch lines</b> draws only where tone is darker
+        than the threshold, so it makes many separate paths. Angle and threshold
+        only bite on the two hatch methods, cover only on the spiral.</div>
+    </div>
+  </div>
+
+  <div class="panel" style="margin-top:14px">
+    <h2>paper and pen</h2>
+    <div class="row"><label for="model">machine</label>
+      <select id="model" style="grid-column: 2 / span 2"></select></div>
+    <div class="row"><label for="pw">paper</label>
+      <input type="number" id="pw" value="420" style="grid-column:2">
+      <input type="number" id="ph" value="297"></div>
+    <div class="row"><label for="margin">margin</label>
+      <input type="range" id="margin" min="0" max="60" step="1" value="20"><output id="marginV"></output></div>
+    <div class="row"><label for="rot90">rotate</label>
+      <input type="checkbox" id="rot90" style="justify-self:start"><output></output></div>
+    <div class="row"><label for="flipy">flip y</label>
+      <input type="checkbox" id="flipy" style="justify-self:start"><output></output></div>
+    <div class="row"><label for="speed">speed</label>
+      <input type="range" id="speed" min="5" max="100" step="1" value="25"><output id="speedV"></output></div>
+    <div class="row"><label for="penDown">pen down</label>
+      <input type="range" id="penDown" min="0" max="100" step="1" value="40"><output id="penDownV"></output></div>
+    <div class="row"><label for="penUp">pen up</label>
+      <input type="range" id="penUp" min="0" max="100" step="1" value="60"><output id="penUpV"></output></div>
+    <div class="row"><label for="prev">pre-lap</label>
+      <input type="checkbox" id="prev" checked style="justify-self:start"><output></output></div>
+    <div class="row"><label for="join">join paths</label>
+      <input type="checkbox" id="join" style="justify-self:start"><output></output></div>
+    <div class="note">Join paths concatenates everything into the single
+      continuous polyline the plot endpoint draws. The pen never lifts, so every
+      travel move becomes a real line on the paper. It is off by default and the
+      preview shows those joins in red before you commit to them.</div>
+  </div>
+</div>
+
+<div>
+  <div class="panel">
+    <canvas id="cv" width="840" height="594"></canvas>
+    <div class="stats">
+      <span>paths <b id="sPaths">0</b></span>
+      <span>points <b id="sPts">0</b></span>
+      <span>path <b id="sLen">0</b> mm</span>
+      <span>est <b id="sEst">0</b></span>
+      <span>size <b id="sSize">0</b> mm</span>
+    </div>
+    <div class="poles" id="travel"></div>
+    <div class="bar">
+      <button id="bCheck">check on machine</button>
+      <button id="bPlot" class="primary">plot it</button>
+      <button id="bStop" class="danger" disabled>stop</button>
+      <button id="bSvg">download svg</button>
+    </div>
+    <div id="multi" class="warn hide"></div>
+    <div id="claims"></div>
+    <div id="status">idle</div>
+  </div>
+</div>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+const TAU = Math.PI * 2;
+
+// A spiral at a fine step will happily run to millions of points and then wedge
+// the browser while it tries to draw them. Stop early and say so instead.
+const MAXPTS = 160000;
+
+let CUR = null;      // the same fitted to paper, plus the numbers about it
+let SVGTEXT = "";    // kept so the tolerance slider can reparse without the file
+let IMG = null;      // { w, h, data } luminance grid, 0 dark to 1 light
+let NOTE = "";       // anything the generator wants to admit to
+
+/* ------------------------------------------------------------- svg: matrices */
+
+// [a, b, c, d, e, f] maps (x, y) to (ax + cy + e, bx + dy + f), as SVG does.
+const I = [1, 0, 0, 1, 0, 0];
+const apply = (m, x, y) => [m[0]*x + m[2]*y + m[4], m[1]*x + m[3]*y + m[5]];
+
+function compose(m, n) {           // m applied after n
+  return [m[0]*n[0] + m[2]*n[1], m[1]*n[0] + m[3]*n[1],
+          m[0]*n[2] + m[2]*n[3], m[1]*n[2] + m[3]*n[3],
+          m[0]*n[4] + m[2]*n[5] + m[4], m[1]*n[4] + m[3]*n[5] + m[5]];
+}
+
+// Area scale of the matrix, used to turn a tolerance in paper millimetres into
+// one in the source's own units before anything is flattened.
+const scaleOf = m => Math.sqrt(Math.abs(m[0]*m[3] - m[1]*m[2])) || 1;
+
+function parseTransform(s) {
+  let m = I;
+  const re = /(matrix|translate|scale|rotate|skewX|skewY)\s*\(([^)]*)\)/g;
+  let g;
+  while ((g = re.exec(s))) {
+    const v = g[2].trim().split(/[\s,]+/).map(Number);
+    const a = g[1];
+    let t = I;
+    if (a === "matrix" && v.length >= 6) t = v.slice(0, 6);
+    else if (a === "translate") t = [1, 0, 0, 1, v[0] || 0, v[1] || 0];
+    else if (a === "scale") t = [v[0] || 0, 0, 0, (v.length > 1 ? v[1] : v[0]) || 0, 0, 0];
+    else if (a === "rotate") {
+      const r = (v[0] || 0) * Math.PI / 180, c = Math.cos(r), n = Math.sin(r);
+      t = [c, n, -n, c, 0, 0];
+      if (v.length >= 3) // rotate about a point is translate, rotate, translate back
+        t = compose(compose([1,0,0,1,v[1],v[2]], t), [1,0,0,1,-v[1],-v[2]]);
+    }
+    else if (a === "skewX") t = [1, 0, Math.tan((v[0]||0)*Math.PI/180), 1, 0, 0];
+    else if (a === "skewY") t = [1, Math.tan((v[0]||0)*Math.PI/180), 0, 1, 0, 0];
+    m = compose(m, t);
+  }
+  return m;
+}
+
+/* -------------------------------------------------------- svg: number reader */
+
+// A character scanner rather than a token split, because arc flags are allowed
+// to run together with the numbers around them: "a1 1 0 011 1" is five values,
+// not three, and any tokeniser that treats 011 as a number silently draws the
+// wrong arc.
+class Reader {
+  constructor(s) { this.s = s; this.i = 0; }
+  sep() { while (this.i < this.s.length && /[\s,]/.test(this.s[this.i])) this.i++; }
+  cmd() {
+    this.sep();
+    const c = this.s[this.i];
+    if (c && /[A-Za-z]/.test(c)) { this.i++; return c; }
+    return null;
+  }
+  more() {
+    this.sep();
+    const c = this.s[this.i];
+    return c !== undefined && !/[A-Za-z]/.test(c);
+  }
+  num() {
+    this.sep();
+    const re = /[+-]?(?:\d*\.\d+|\d+\.?)(?:[eE][+-]?\d+)?/y;
+    re.lastIndex = this.i;
+    const g = re.exec(this.s);
+    if (!g) { this.i = this.s.length; return 0; }
+    this.i = re.lastIndex;
+    return parseFloat(g[0]);
+  }
+  flag() {
+    this.sep();
+    const c = this.s[this.i];
+    if (c === "0" || c === "1") { this.i++; return c === "1"; }
+    return this.num() !== 0;
+  }
+}
+
+/* ---------------------------------------------------------- svg: flattening */
+
+const mid = (a, b) => [(a[0]+b[0])/2, (a[1]+b[1])/2];
+
+function offChord(p0, p3, p) {
+  const dx = p3[0]-p0[0], dy = p3[1]-p0[1];
+  const L = Math.hypot(dx, dy);
+  if (L < 1e-12) return Math.hypot(p[0]-p0[0], p[1]-p0[1]);
+  return Math.abs(dy*(p[0]-p0[0]) - dx*(p[1]-p0[1])) / L;
+}
+
+function cubic(out, p0, p1, p2, p3, tol, d) {
+  if (d > 20 || (offChord(p0, p3, p1) <= tol && offChord(p0, p3, p2) <= tol)) {
+    out.push(p3);
+    return;
+  }
+  const a = mid(p0,p1), b = mid(p1,p2), c = mid(p2,p3);
+  const e = mid(a,b), f = mid(b,c), g = mid(e,f);
+  cubic(out, p0, a, e, g, tol, d+1);
+  cubic(out, g, f, c, p3, tol, d+1);
+}
+
+const quad = (out, p0, p1, p2, tol) => cubic(out, p0,
+  [p0[0] + 2/3*(p1[0]-p0[0]), p0[1] + 2/3*(p1[1]-p0[1])],
+  [p2[0] + 2/3*(p1[0]-p2[0]), p2[1] + 2/3*(p1[1]-p2[1])], p2, tol, 0);
+
+// Step in radians that keeps the sagitta of one chord under the tolerance. An
+// arc is sampled rather than subdivided because the endpoint form has to be
+// converted to a centre first anyway.
+function arcStep(r, tol) {
+  if (r <= tol) return Math.PI / 2;
+  return Math.min(Math.PI / 2, 2 * Math.acos(Math.max(-1, 1 - tol / r)));
+}
+
+function ellipseArc(out, cx, cy, rx, ry, phi, t0, dt, tol) {
+  const n = Math.max(2, Math.ceil(Math.abs(dt) / arcStep(Math.max(rx, ry), tol)));
+  const cp = Math.cos(phi), sp = Math.sin(phi);
+  for (let i = 1; i <= n; i++) {
+    const t = t0 + dt * i / n;
+    const x = rx * Math.cos(t), y = ry * Math.sin(t);
+    out.push([cx + x*cp - y*sp, cy + x*sp + y*cp]);
+  }
+}
+
+// Endpoint parameterisation to centre parameterisation, straight out of the SVG
+// implementation notes. The radius correction matters: real files routinely
+// carry radii too small to span the endpoints.
+function arcTo(out, p0, rx, ry, deg, large, sweep, p1, tol) {
+  rx = Math.abs(rx); ry = Math.abs(ry);
+  if (rx < 1e-12 || ry < 1e-12) { out.push(p1); return; }
+  const phi = deg * Math.PI / 180, cp = Math.cos(phi), sp = Math.sin(phi);
+  const dx = (p0[0]-p1[0])/2, dy = (p0[1]-p1[1])/2;
+  const x1 = cp*dx + sp*dy, y1 = -sp*dx + cp*dy;
+  const lam = x1*x1/(rx*rx) + y1*y1/(ry*ry);
+  if (lam > 1) { const k = Math.sqrt(lam); rx *= k; ry *= k; }
+  const num = rx*rx*ry*ry - rx*rx*y1*y1 - ry*ry*x1*x1;
+  const den = rx*rx*y1*y1 + ry*ry*x1*x1;
+  let co = Math.sqrt(Math.max(0, num / den));
+  if (large === sweep) co = -co;
+  const cx1 = co * rx * y1 / ry, cy1 = -co * ry * x1 / rx;
+  const cx = cp*cx1 - sp*cy1 + (p0[0]+p1[0])/2;
+  const cy = sp*cx1 + cp*cy1 + (p0[1]+p1[1])/2;
+  const ang = (ux, uy, vx, vy) => {
+    const s = Math.sign(ux*vy - uy*vx) || 1;
+    const c = (ux*vx + uy*vy) / (Math.hypot(ux,uy) * Math.hypot(vx,vy) || 1);
+    return s * Math.acos(Math.max(-1, Math.min(1, c)));
+  };
+  const t0 = ang(1, 0, (x1-cx1)/rx, (y1-cy1)/ry);
+  let dt = ang((x1-cx1)/rx, (y1-cy1)/ry, (-x1-cx1)/rx, (-y1-cy1)/ry);
+  if (!sweep && dt > 0) dt -= TAU;
+  if (sweep && dt < 0) dt += TAU;
+  ellipseArc(out, cx, cy, rx, ry, phi, t0, dt, tol);
+}
+
+/* --------------------------------------------------------------- svg: shapes */
+
+function parsePathData(d, tol) {
+  const r = new Reader(d);
+  const subs = [];
+  let cur = null, pt = [0, 0], start = [0, 0];
+  let lastC = null, lastQ = null, cmd = null;
+  const open = p => { cur = [p.slice()]; subs.push(cur); };
+  const push = p => { if (!cur) open(pt); cur.push(p.slice()); };
+
+  while (true) {
+    const c = r.cmd();
+    if (c) cmd = c;
+    else if (cmd && r.more()) { if (cmd === "M") cmd = "L"; else if (cmd === "m") cmd = "l"; }
+    else break;
+    const rel = cmd === cmd.toLowerCase();
+    const bx = rel ? pt[0] : 0, by = rel ? pt[1] : 0;
+    const up = cmd.toUpperCase();
+
+    if (up === "Z") { if (cur) cur.push(start.slice()); pt = start.slice(); cur = null; }
+    else if (up === "M") {
+      pt = [r.num() + bx, r.num() + by]; start = pt.slice(); open(pt);
+      lastC = lastQ = null;
+    }
+    else if (up === "L") { pt = [r.num() + bx, r.num() + by]; push(pt); lastC = lastQ = null; }
+    else if (up === "H") { pt = [r.num() + bx, pt[1]]; push(pt); lastC = lastQ = null; }
+    else if (up === "V") { pt = [pt[0], r.num() + by]; push(pt); lastC = lastQ = null; }
+    else if (up === "C" || up === "S") {
+      let c1;
+      if (up === "C") c1 = [r.num() + bx, r.num() + by];
+      // S reflects the previous cubic's second control point, and falls back to
+      // the current point when the previous segment was not a cubic.
+      else c1 = lastC ? [2*pt[0] - lastC[0], 2*pt[1] - lastC[1]] : pt.slice();
+      const c2 = [r.num() + bx, r.num() + by];
+      const p3 = [r.num() + bx, r.num() + by];
+      if (!cur) open(pt);
+      cubic(cur, pt, c1, c2, p3, tol, 0);
+      pt = p3; lastC = c2; lastQ = null;
+    }
+    else if (up === "Q" || up === "T") {
+      let c1;
+      if (up === "Q") c1 = [r.num() + bx, r.num() + by];
+      else c1 = lastQ ? [2*pt[0] - lastQ[0], 2*pt[1] - lastQ[1]] : pt.slice();
+      const p2 = [r.num() + bx, r.num() + by];
+      if (!cur) open(pt);
+      quad(cur, pt, c1, p2, tol);
+      pt = p2; lastQ = c1; lastC = null;
+    }
+    else if (up === "A") {
+      const rx = r.num(), ry = r.num(), rot = r.num();
+      const large = r.flag(), sweep = r.flag();
+      const p1 = [r.num() + bx, r.num() + by];
+      if (!cur) open(pt);
+      arcTo(cur, pt, rx, ry, rot, large, sweep, p1, tol);
+      pt = p1; lastC = lastQ = null;
+    }
+    else break;                       // an unknown command, stop rather than guess
+  }
+  return subs.filter(s => s.length >= 2);
+}
+
+const attr = (el, n, dflt) => {
+  const v = el.getAttribute(n);
+  if (v === null || v === "") return dflt;
+  const f = parseFloat(v);
+  return Number.isFinite(f) ? f : dflt;
+};
+
+function shapePaths(el, tol) {
+  const tag = el.tagName.toLowerCase();
+  if (tag === "path") return parsePathData(el.getAttribute("d") || "", tol);
+  if (tag === "line")
+    return [[[attr(el,"x1",0), attr(el,"y1",0)], [attr(el,"x2",0), attr(el,"y2",0)]]];
+  if (tag === "polyline" || tag === "polygon") {
+    const v = (el.getAttribute("points") || "").trim().split(/[\s,]+/).map(Number);
+    const p = [];
+    for (let i = 0; i + 1 < v.length; i += 2)
+      if (Number.isFinite(v[i]) && Number.isFinite(v[i+1])) p.push([v[i], v[i+1]]);
+    if (p.length < 2) return [];
+    if (tag === "polygon") p.push(p[0].slice());
+    return [p];
+  }
+  if (tag === "rect") {
+    const x = attr(el,"x",0), y = attr(el,"y",0);
+    const w = attr(el,"width",0), h = attr(el,"height",0);
+    if (w <= 0 || h <= 0) return [];
+    let rx = attr(el,"rx",NaN), ry = attr(el,"ry",NaN);
+    if (!Number.isFinite(rx) && !Number.isFinite(ry)) rx = ry = 0;
+    if (!Number.isFinite(rx)) rx = ry;
+    if (!Number.isFinite(ry)) ry = rx;
+    rx = Math.min(rx, w/2); ry = Math.min(ry, h/2);
+    if (rx <= 0 || ry <= 0)
+      return [[[x,y],[x+w,y],[x+w,y+h],[x,y+h],[x,y]]];
+    const o = [[x+rx, y]];
+    o.push([x+w-rx, y]);
+    ellipseArc(o, x+w-rx, y+ry, rx, ry, 0, -Math.PI/2, Math.PI/2, tol);
+    o.push([x+w, y+h-ry]);
+    ellipseArc(o, x+w-rx, y+h-ry, rx, ry, 0, 0, Math.PI/2, tol);
+    o.push([x+rx, y+h]);
+    ellipseArc(o, x+rx, y+h-ry, rx, ry, 0, Math.PI/2, Math.PI/2, tol);
+    o.push([x, y+ry]);
+    ellipseArc(o, x+rx, y+ry, rx, ry, 0, Math.PI, Math.PI/2, tol);
+    return [o];
+  }
+  if (tag === "circle" || tag === "ellipse") {
+    const cx = attr(el,"cx",0), cy = attr(el,"cy",0);
+    const rx = tag === "circle" ? attr(el,"r",0) : attr(el,"rx",0);
+    const ry = tag === "circle" ? attr(el,"r",0) : attr(el,"ry",0);
+    if (rx <= 0 || ry <= 0) return [];
+    const o = [[cx + rx, cy]];
+    ellipseArc(o, cx, cy, rx, ry, 0, 0, TAU, tol);
+    return [o];
+  }
+  return [];
+}
+
+const SKIP = new Set(["defs", "clippath", "mask", "symbol", "marker", "pattern",
+                      "text", "metadata", "title", "desc", "style", "filter"]);
+
+function parseSvg(text, tolMm, scaleGuess) {
+  const doc = new DOMParser().parseFromString(text, "image/svg+xml");
+  if (doc.getElementsByTagName("parsererror").length)
+    throw new Error("that is not valid svg");
+  const root = doc.documentElement;
+  if (!root || root.tagName.toLowerCase() !== "svg")
+    throw new Error("no <svg> element at the top of the file");
+  const out = [];
+  let skipped = 0;
+
+  (function walk(el, m) {
+    for (const ch of el.children) {
+      const tag = ch.tagName.toLowerCase();
+      if (SKIP.has(tag)) { if (tag === "text") skipped++; continue; }
+      const style = (ch.getAttribute("style") || "") + ";" +
+                    (ch.getAttribute("display") === "none" ? "display:none" : "");
+      if (/display\s*:\s*none|visibility\s*:\s*hidden/.test(style)) continue;
+      const cm = compose(m, parseTransform(ch.getAttribute("transform") || ""));
+      if (tag === "g" || tag === "a" || tag === "svg") { walk(ch, cm); continue; }
+      // Flatten in the source's own units, so the tolerance has to come back
+      // through the transform and through the fit that has not happened yet.
+      const tol = tolMm / (scaleGuess * scaleOf(cm));
+      for (const p of shapePaths(ch, tol))
+        out.push(p.map(q => apply(cm, q[0], q[1])));
+      walk(ch, cm);
+    }
+  })(root, I);
+
+  if (skipped) NOTE = `${skipped} text element${skipped > 1 ? "s" : ""} ignored, convert text to paths first`;
+  return out;
+}
+
+/* ------------------------------------------------------------- json sources */
+
+function parseJson(text) {
+  const v = JSON.parse(text);
+  if (!Array.isArray(v) || !v.length) throw new Error("expected a non-empty array");
+  const isPt = p => Array.isArray(p) && p.length >= 2 &&
+                    Number.isFinite(+p[0]) && Number.isFinite(+p[1]);
+  const paths = isPt(v[0]) ? [v] : v;
+  const out = [];
+  for (const p of paths) {
+    if (!Array.isArray(p)) throw new Error("every path must be an array of points");
+    const pts = p.filter(isPt).map(q => [+q[0], +q[1]]);
+    if (pts.length >= 2) out.push(pts);
+  }
+  if (!out.length) throw new Error("no path with two or more finite points");
+  return out;
+}
+
+/* ------------------------------------------------------- raster: tone sampling */
+
+function tone(x, y) {
+  // Outside the picture reads as paper white, so a spiral that overruns the
+  // frame keeps going as a plain unmodulated arc instead of smearing the edge.
+  if (!IMG || x < 0 || y < 0 || x >= IMG.w || y >= IMG.h) return 1;
+  let b = IMG.data[(y | 0) * IMG.w + (x | 0)] / 255;
+  if ($("invert").checked) b = 1 - b;
+  return Math.pow(Math.max(0, Math.min(1, b)), +$("gamma").value);
+}
+
+function loadImage(src) {
+  return new Promise((res, rej) => {
+    const im = new Image();
+    im.onload = () => {
+      // Work at a fixed size so the spacing sliders mean the same thing
+      // whatever the file's own resolution happens to be.
+      const s = 800 / Math.max(im.width, im.height);
+      const w = Math.max(2, Math.round(im.width * Math.min(1, s)));
+      const h = Math.max(2, Math.round(im.height * Math.min(1, s)));
+      const c = document.createElement("canvas");
+      c.width = w; c.height = h;
+      const g = c.getContext("2d", { willReadFrequently: true });
+      g.fillStyle = "#fff"; g.fillRect(0, 0, w, h);
+      g.drawImage(im, 0, 0, w, h);
+      const d = g.getImageData(0, 0, w, h).data;
+      const lum = new Uint8ClampedArray(w * h);
+      for (let i = 0, j = 0; i < lum.length; i++, j += 4)
+        lum[i] = 0.2126*d[j] + 0.7152*d[j+1] + 0.0722*d[j+2];
+      res({ w, h, data: lum });
+    };
+    im.onerror = () => rej(new Error("could not decode that image"));
+    im.src = src;
+  });
+}
+
+/* ----------------------------------------------------- raster: interpretations */
+
+function genSpiral() {
+  // One Archimedean spiral, radius modulated by local darkness. A plotter
+  // draws this without ever lifting the pen, which is the whole reason to
+  // prefer it over a dot or line screen.
+  const sp = +$("spacing").value, amt = +$("amount").value;
+  const wl = Math.max(1, +$("wave").value);
+  const rmax = Math.min(IMG.w, IMG.h) / 2 * (+$("cover").value);
+  const cx = IMG.w / 2, cy = IMG.h / 2;
+  const ds = Math.max(0.5, wl / 8);          // eight samples per wave crest
+  const pts = [];
+  let th = 0, phase = 0;
+  while (true) {
+    const r = sp * th / TAU;
+    if (r > rmax) break;
+    if (pts.length >= MAXPTS) { NOTE = `stopped at ${MAXPTS} points, widen the spacing`; break; }
+    const b = tone(cx + r*Math.cos(th), cy + r*Math.sin(th));
+    const rr = r + (1 - b) * sp * 0.5 * amt * Math.sin(phase);
+    pts.push([cx + rr*Math.cos(th), cy + rr*Math.sin(th)]);
+    const dth = Math.min(0.4, ds / Math.max(r, 1));
+    phase += TAU * (Math.max(r, 1) * dth) / wl;
+    th += dth;
+  }
+  return pts.length >= 2 ? [pts] : [];
+}
+
+// Where the infinite line through (u, v) in the hatch frame enters and leaves
+// the picture. Rows that miss it entirely are dropped, so the block of hatching
+// takes the outline of the image rather than of its bounding circle.
+function clipRow(v, ca, sa, cx, cy) {
+  let u0 = -1e9, u1 = 1e9;
+  const test = (p, q) => {           // p * u <= q
+    if (Math.abs(p) < 1e-9) return q >= 0;
+    const t = q / p;
+    if (p > 0) u1 = Math.min(u1, t); else u0 = Math.max(u0, t);
+    return true;
+  };
+  const x0 = cx - v*sa, y0 = cy + v*ca;
+  if (!test(-ca, x0) || !test(ca, IMG.w - x0)) return null;
+  if (!test(-sa, y0) || !test(sa, IMG.h - y0)) return null;
+  return u1 - u0 > 1 ? [u0, u1] : null;
+}
+
+function genHatch(mode) {
+  const sp = +$("spacing").value, amt = +$("amount").value;
+  const wl = Math.max(1, +$("wave").value);
+  const a = +$("angle").value * Math.PI / 180;
+  const ca = Math.cos(a), sa = Math.sin(a);
+  const cx = IMG.w / 2, cy = IMG.h / 2;
+  const R = Math.hypot(IMG.w, IMG.h) / 2;
+  const ds = Math.max(0.5, wl / 8);
+  const th = +$("thresh").value;
+  const toImg = (u, v) => [cx + u*ca - v*sa, cy + u*sa + v*ca];
+
+  const paths = [];
+  let run = null, total = 0, flip = false;
+  for (let v = -R; v <= R; v += sp) {
+    const span = clipRow(v, ca, sa, cx, cy);
+    if (!span) continue;
+    const n = Math.max(2, Math.ceil((span[1] - span[0]) / ds));
+    for (let i = 0; i <= n; i++) {
+      if (total >= MAXPTS) { NOTE = `stopped at ${MAXPTS} points, widen the spacing`; v = R + 1; break; }
+      // Alternate direction so consecutive rows meet end to end and the wave
+      // stays one path. Reversing is free here and a pen lift is not.
+      const k = flip ? n - i : i;
+      const u = span[0] + (span[1] - span[0]) * k / n;
+      const [x, y] = toImg(u, v);
+      const b = tone(x, y);
+      if (mode === "lines") {
+        if (b <= th) {
+          if (!run) { run = []; paths.push(run); }
+          run.push([x, y]); total++;
+        } else run = null;
+      } else {
+        const off = (1 - b) * sp * 0.5 * amt * Math.sin(TAU * (u - span[0]) / wl);
+        if (!run) { run = []; paths.push(run); }
+        run.push([x - off*sa, y + off*ca]);
+        total++;
+      }
+    }
+    flip = !flip;
+  }
+  return paths.filter(p => p.length >= 2);
+}
+
+/* ------------------------------------------------------------- read and fit */
+
+function build() {
+  NOTE = "";
+  const kind = $("src").value;
+  if (kind === "json") return parseJson($("jsonText").value);
+  if (kind === "img") {
+    if (!IMG) return [];
+    const m = $("imode").value;
+    return m === "spiral" ? genSpiral() : genHatch(m);
+  }
+  const text = $("svgText").value.trim() || SVGTEXT;
+  if (!text) return [];
+  // Two passes: the tolerance is in finished millimetres, which is only known
+  // once the fit scale is, and the fit scale needs a flattened path to measure.
+  // The first pass at a token tolerance is only there to get the bbox.
+  const rough = parseSvg(text, 0.25, 1);
+  if (!rough.length) return [];
+  return parseSvg(text, +$("tol").value, fitScale(rough));
+}
+
+function bboxOf(paths) {
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  for (const p of paths) for (const q of p) {
+    if (q[0] < x0) x0 = q[0];
+    if (q[0] > x1) x1 = q[0];
+    if (q[1] < y0) y0 = q[1];
+    if (q[1] > y1) y1 = q[1];
+  }
+  return [x0, y0, x1, y1];
+}
+
+function fitScale(paths) {
+  const pw = +$("pw").value, ph = +$("ph").value, m = +$("margin").value;
+  const [x0, y0, x1, y1] = bboxOf(paths);
+  let w = (x1 - x0) || 1, h = (y1 - y0) || 1;
+  if ($("rot90").checked) [w, h] = [h, w];
+  return Math.min((pw - 2*m) / w, (ph - 2*m) / h);
+}
+
+// The same fit as the curve studio: origin at the home corner, y down, and the
+// drawing centred inside the margin. Everything downstream is in millimetres.
+function fitToPaper(paths) {
+  const pw = +$("pw").value, ph = +$("ph").value, m = +$("margin").value;
+  let ps = paths;
+  if ($("flipy").checked) ps = ps.map(p => p.map(q => [q[0], -q[1]]));
+  if ($("rot90").checked) ps = ps.map(p => p.map(q => [q[1], -q[0]]));
+  const [x0, y0, x1, y1] = bboxOf(ps);
+  const w = (x1 - x0) || 1, h = (y1 - y0) || 1;
+  const s = Math.min((pw - 2*m) / w, (ph - 2*m) / h);
+  const ox = (pw - w*s)/2, oy = (ph - h*s)/2;
+  return { paths: ps.map(p => p.map(q => [(q[0]-x0)*s + ox, (q[1]-y0)*s + oy])),
+           w: w*s, h: h*s, pw, ph };
+}
+
+const lengthOf = p => {
+  let L = 0;
+  for (let i = 1; i < p.length; i++) L += Math.hypot(p[i][0]-p[i-1][0], p[i][1]-p[i-1][1]);
+  return L;
+};
+
+/* ------------------------------------------------------------------ render */
+
+function syncPanels() {
+  const k = $("src").value;
+  $("panSvg").classList.toggle("hide", k !== "svg");
+  $("panJson").classList.toggle("hide", k !== "json");
+  $("panImg").classList.toggle("hide", k !== "img");
+  $("file").accept = k === "img" ? "image/*" : k === "json" ? ".json,application/json" : ".svg,image/svg+xml";
+}
+
+function render() {
+  for (const id of ["tol","minlen","spacing","amount","wave","angle","gamma",
+                    "thresh","cover","margin","speed","penDown","penUp"]) {
+    const o = $(id + "V"); if (o) o.textContent = $(id).value;
+  }
+  let paths;
+  try {
+    paths = build();
+  } catch (e) {
+    CUR = null; draw(null);
+    setStatus("error", String(e.message || e));
+    return;
+  }
+  const minl = +$("minlen").value;
+  if (!paths.length) { CUR = null; draw(null); stats(null); return; }
+
+  // Drop under is in paper millimetres, so it is applied to the source paths
+  // through the fit scale and the fit is taken afterwards. Filtering after the
+  // fit instead would leave the crumbs still setting the bounding box.
+  if (minl > 0 && $("src").value === "svg") {
+    const s = fitScale(paths);
+    const keep = paths.filter(p => lengthOf(p) * s >= minl);
+    if (keep.length) paths = keep;
+  }
+  const fit = fitToPaper(paths);
+  CUR = fit;
+  draw(fit);
+  stats(fit);
+  // A parse error from a moment ago is no longer true once something has been
+  // imported, and a stale red box reads as a warning about the current path.
+  if (NOTE) setStatus("idle", NOTE);
+  else if ($("status").className === "error") setStatus("idle", DEMO ? DEMO_MSG : "idle");
+}
+
+function draw(fit) {
+  const cv = $("cv"), g = cv.getContext("2d");
+  g.clearRect(0, 0, cv.width, cv.height);
+  if (!fit) return;
+  const sc = Math.min(cv.width/fit.pw, cv.height/fit.ph);
+  const ox = (cv.width - fit.pw*sc)/2, oy = (cv.height - fit.ph*sc)/2;
+  g.fillStyle = "#fff"; g.fillRect(ox, oy, fit.pw*sc, fit.ph*sc);
+  g.strokeStyle = "#c9c6bd"; g.lineWidth = 1;
+  g.strokeRect(ox, oy, fit.pw*sc, fit.ph*sc);
+
+  g.strokeStyle = "rgba(16,16,20,0.72)";
+  g.lineWidth = 0.32; g.lineJoin = "round";
+  g.beginPath();
+  for (const p of fit.paths)
+    p.forEach((q, i) => { const X = ox+q[0]*sc, Y = oy+q[1]*sc;
+                          i ? g.lineTo(X, Y) : g.moveTo(X, Y); });
+  g.stroke();
+
+  if (fit.paths.length > 1) {
+    // Travel between paths, drawn as what it is. Ticking join paths turns every
+    // one of these red dashes into ink on the sheet.
+    g.strokeStyle = $("join").checked ? "rgba(163,45,45,0.75)" : "rgba(163,45,45,0.35)";
+    g.lineWidth = $("join").checked ? 0.8 : 0.5;
+    g.setLineDash([4, 3]);
+    g.beginPath();
+    for (let i = 1; i < fit.paths.length; i++) {
+      const a = fit.paths[i-1][fit.paths[i-1].length - 1], b = fit.paths[i][0];
+      g.moveTo(ox + a[0]*sc, oy + a[1]*sc);
+      g.lineTo(ox + b[0]*sc, oy + b[1]*sc);
+    }
+    g.stroke();
+    g.setLineDash([]);
+  }
+}
+
+function stats(fit) {
+  if (!fit) {
+    for (const id of ["sPaths","sPts","sLen","sEst","sSize"]) $(id).textContent = "0";
+    $("travel").textContent = "";
+    $("multi").classList.add("hide");
+    $("bSvg").disabled = true;
+    if (!DEMO) $("bPlot").disabled = true;
+    return;
+  }
+  let pts = 0, len = 0, travel = 0;
+  fit.paths.forEach((p, i) => {
+    pts += p.length;
+    len += lengthOf(p);
+    if (i) {
+      const a = fit.paths[i-1][fit.paths[i-1].length - 1];
+      travel += Math.hypot(p[0][0]-a[0], p[0][1]-a[1]);
+    }
+  });
+  const est = (len + travel) / (2.18 * +$("speed").value);
+  $("sPaths").textContent = fit.paths.length;
+  $("sPts").textContent = pts;
+  $("sLen").textContent = Math.round(len);
+  $("sEst").textContent = est > 3600 ? (est/3600).toFixed(1)+" h"
+                        : est > 90 ? Math.round(est/60)+" min" : Math.round(est)+" s";
+  $("sSize").textContent = Math.round(fit.w) + " x " + Math.round(fit.h);
+  $("travel").innerHTML = fit.paths.length > 1
+    ? `travel between paths <b>${Math.round(travel)}</b> mm` : "";
+
+  $("bSvg").disabled = false;
+  const many = fit.paths.length > 1 && !$("join").checked;
+  $("multi").classList.toggle("hide", fit.paths.length < 2);
+  if (fit.paths.length > 1)
+    $("multi").textContent = $("join").checked
+      ? `${fit.paths.length} paths will be drawn as one line: the ${Math.round(travel)} mm of travel shown in red gets inked too.`
+      : `${fit.paths.length} separate paths. The plot endpoint draws one continuous polyline, so it cannot lift the pen between them. Download the svg, or tick join paths and accept the travel lines.`;
+  if (!DEMO) $("bPlot").disabled = many;
+}
+
+/* ------------------------------------------------------------------ plotter */
+
+const flatPoints = () => CUR.paths.flat();
+
+const payload = () => ({ points: flatPoints(), model: +$("model").value,
+  speed: +$("speed").value, pen_up: +$("penUp").value,
+  pen_down: +$("penDown").value, preview: $("prev").checked });
+
+const showClaims = cl => $("claims").innerHTML = (cl||[]).map(c =>
+  `<div class="${c.ok?"ok":"no"}">${c.label}${c.detail?"  ·  "+c.detail:""}</div>`).join("");
+
+function setStatus(state, msg) {
+  const el = $("status"); el.className = state; el.textContent = msg;
+  if (DEMO) return;
+  $("bStop").disabled = state !== "running";
+  $("bPlot").disabled = state === "running" ||
+    (CUR ? CUR.paths.length > 1 && !$("join").checked : true);
+}
+
+async function post(path) {
+  if (!CUR || !CUR.paths.length) { setStatus("error", "nothing imported yet"); return null; }
+  const body = JSON.stringify(payload());
+  const mb = (body.length / 1048576).toFixed(1);
+  setStatus("running", `sending ${flatPoints().length} points (${mb} MB) to the Pi...`);
+  try {
+    const r = await fetch(path, { method: "POST",
+      headers: { "Content-Type": "application/json" }, body });
+    return await r.json();
+  } catch (e) {
+    setStatus("error", `could not reach the Pi: ${e}`);
+    return null;
+  }
+}
+
+async function check() {
+  const d = await post("/api/check");
+  if (!d) return;
+  showClaims(d.claims);
+  setStatus(d.ok ? "idle" : "error", d.ok
+    ? `fits the machine. ${d.segments} segments, ${d.length_mm} mm of line`
+    : "does not fit the machine, see above");
+}
+
+async function plot() {
+  const d = await post("/api/plot");
+  if (!d) return;
+  if (!d.ok) { showClaims(d.claims); setStatus("error", d.message); return; }
+  showClaims([]); poll();
+}
+
+async function stopPlot() {
+  try { await fetch("/api/stop", { method: "POST" }); }
+  catch (e) { setStatus("error", `could not reach the Pi: ${e}`); }
+}
+
+async function poll() {
+  const d = await (await fetch("/api/status")).json();
+  const pct = d.total ? Math.round(100*d.done/d.total) : 0;
+  const left = d.remaining_s ? `, about ${Math.round(d.remaining_s/60)} min left` : "";
+  setStatus(d.state, d.state === "running"
+    ? `${d.message}, ${pct}% (${d.done}/${d.total})${left}` : d.message);
+  if (d.busy) setTimeout(poll, 1200);
+}
+
+function downloadSvg() {
+  const f = CUR;
+  // One subpath per imported path, so a pen-lifting tool downstream still knows
+  // where the breaks are even though the plot endpoint cannot use them.
+  const d = f.paths.map(p =>
+    "M" + p.map(q => `${q[0].toFixed(2)},${q[1].toFixed(2)}`).join(" L")).join(" ");
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${f.pw}mm" height="${f.ph}mm" viewBox="0 0 ${f.pw} ${f.ph}"><path d="${d}" fill="none" stroke="black" stroke-width="0.25"/></svg>`;
+  const url = URL.createObjectURL(new Blob([svg], { type: "image/svg+xml" }));
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `piplot_import_${$("src").value}.svg`;
+  // The anchor has to be in the document before the click or some browsers
+  // drop the download without a word, and the blob leaks unless it is revoked.
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  setStatus("done", `saved ${a.download}, ${flatPoints().length} points`);
+}
+
+/* --------------------------------------------------------------------- init */
+
+// The same file is served by server.py next to a real plotter and by GitHub
+// Pages with nothing behind it. All the importing and interpreting runs in the
+// browser, so the only thing missing without a server is the plotting itself.
+const OFFLINE_MODELS = {
+  1:{name:"AxiDraw V2 / V3 / SE-A4",x:300,y:218}, 2:{name:"AxiDraw V3-A3 / SE-A3",x:430,y:297},
+  3:{name:"AxiDraw V3 XLX",x:595,y:218},          4:{name:"AxiDraw MiniKit",x:160,y:101},
+  5:{name:"AxiDraw SE-A1",x:864,y:594},           6:{name:"AxiDraw SE-A2",x:594,y:432},
+  7:{name:"AxiDraw V3-B6",x:180,y:140},           8:{name:"A1 plotter",x:841,y:594},
+  9:{name:"A0 plotter",x:1189,y:841},
+};
+let DEMO = false;
+const DEMO_MSG = "Demo mode: import something and download the svg. " +
+  "Run server.py on a Pi wired to a plotter to draw it.";
+
+const SAMPLE_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 120">
+  <g transform="translate(10,10) rotate(6)">
+    <rect x="0" y="0" width="80" height="50" rx="10"/>
+    <circle cx="120" cy="30" r="24"/>
+    <path d="M10 70 C 40 110, 90 30, 120 70 S 170 110, 185 70"/>
+    <polyline points="10,95 40,105 70,88 100,102"/>
+  </g>
+</svg>`;
+
+const SAMPLE_JSON = `[[[0,0],[100,0],[100,60],[0,60],[0,0]],
+ [[20,20],[80,20],[50,45],[20,20]]]`;
+
+async function fileChosen(e) {
+  const f = e.target.files && e.target.files[0];
+  if (!f) return;
+  const kind = $("src").value;
+  try {
+    if (kind === "img") {
+      const url = URL.createObjectURL(f);
+      IMG = await loadImage(url);
+      URL.revokeObjectURL(url);
+      setStatus("done", `loaded ${f.name}, ${IMG.w} x ${IMG.h} working pixels`);
+    } else {
+      const text = await f.text();
+      if (kind === "svg") { SVGTEXT = text; $("svgText").value = text.slice(0, 4000); }
+      else $("jsonText").value = text;
+      setStatus("done", `loaded ${f.name}, ${(f.size/1024).toFixed(1)} kB`);
+    }
+  } catch (err) {
+    setStatus("error", String(err.message || err));
+    return;
+  }
+  render();
+}
+
+(async function init() {
+  let info;
+  try {
+    const r = await fetch("/api/info", { cache: "no-store" });
+    if (!r.ok) throw new Error("status " + r.status);
+    info = await r.json();
+  } catch (e) {
+    DEMO = true;
+    info = { version: "demo", host: "no plotter", models: OFFLINE_MODELS };
+  }
+  $("ver").textContent = "v" + info.version;
+  $("host").textContent = info.host;
+  $("model").innerHTML = Object.entries(info.models).map(([k,v]) =>
+    `<option value="${k}" ${k==="2"?"selected":""}>${v.name} (${v.x}x${v.y})</option>`).join("");
+
+  $("svgText").value = SAMPLE_SVG;
+  $("jsonText").value = SAMPLE_JSON;
+
+  $("src").addEventListener("change", () => { syncPanels(); render(); });
+  $("file").addEventListener("change", fileChosen);
+  ["tol","minlen","spacing","amount","wave","angle","gamma","thresh","cover",
+   "invert","imode","pw","ph","margin","rot90","flipy","speed","penDown",
+   "penUp","join"].forEach(id => $(id).addEventListener("input", render));
+  // A big svg or a long paste should not reparse on every keystroke.
+  let t = null;
+  for (const id of ["svgText", "jsonText"])
+    $(id).addEventListener("input", () => {
+      if (id === "svgText") SVGTEXT = "";
+      clearTimeout(t); t = setTimeout(render, 350);
+    });
+
+  if (DEMO) {
+    $("demoFlag").classList.remove("hide");
+    for (const b of ["bCheck","bPlot","bStop"]) {
+      $(b).disabled = true;
+      $(b).title = "needs a plotter and the piplot server";
+    }
+  }
+  $("bCheck").onclick = check;
+  $("bPlot").onclick = plot;
+  $("bStop").onclick = stopPlot;
+  $("bSvg").onclick = downloadSvg;
+
+  syncPanels();
+  render();
+  if (DEMO) setStatus("idle", DEMO_MSG);
+  else poll();
+})();
+</script>
+</body>
+</html>
