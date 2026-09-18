@@ -180,6 +180,8 @@
 
   <div class="panel" style="margin-top:14px">
     <h2>paper and pen</h2>
+    <div class="row"><label for="board">plotter</label>
+      <select id="board" style="grid-column: 2 / span 2"></select></div>
     <div class="row"><label for="model">machine</label>
       <select id="model" style="grid-column: 2 / span 2"></select></div>
     <div class="row"><label for="pw">paper</label>
@@ -689,7 +691,8 @@ function render() {
 
 /* ------------------------------------------------------------------ plotter */
 
-const payload = () => ({ points: CUR.pts, nib: CUR.nib, model: +$("model").value,
+const payload = () => ({ points: CUR.pts, nib: CUR.nib, port: $("board").value,
+  model: +$("model").value,
   speed: +$("speed").value, pen_up: +$("penUp").value,
   pen_down: +$("penDown").value, preview: $("prev").checked });
 
@@ -737,6 +740,32 @@ async function plot() {
 async function stopPlot() {
   try { await fetch("/api/stop", { method: "POST" }); }
   catch (e) { setStatus("error", `could not reach the Pi: ${e}`); }
+}
+
+async function refreshBoards() {
+  // With more than one EiBotBoard attached the driver cannot choose between
+  // them and reports finding none, so the board has to be named explicitly.
+  const sel = $("board");
+  if (DEMO) {
+    sel.innerHTML = '<option value="">no plotter in demo mode</option>';
+    sel.disabled = true;
+    return;
+  }
+  try {
+    const d = await (await fetch("/api/boards")).json();
+    const bs = d.boards || [];
+    if (!bs.length) {
+      sel.innerHTML = '<option value="">none found</option>';
+      return;
+    }
+    sel.innerHTML = (bs.length > 1 ? "" : '<option value="">auto</option>') +
+      bs.map(b => `<option value="${b.nickname || b.device}">` +
+        `${b.label}${b.busy ? " (busy)" : ""}</option>`).join("");
+    if (bs.length > 1)
+      setStatus("idle", `${bs.length} plotters attached. Pick which one to draw on.`);
+  } catch (e) {
+    sel.innerHTML = '<option value="">could not list</option>';
+  }
 }
 
 async function poll() {
@@ -808,6 +837,7 @@ let DEMO = false;
     setStatus("idle", "Demo mode: design a curve and download the svg. " +
       "Run server.py on a Pi wired to a plotter to draw it.");
   }
+  await refreshBoards();
   $("bCheck").onclick = check;
   $("bPlot").onclick = plot;
   $("bStop").onclick = stopPlot;

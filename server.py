@@ -27,7 +27,7 @@ from flask import Flask, jsonify, request, send_from_directory
 
 from pen_box import MODELS  # noqa: E402  the machine travel envelopes
 
-VERSION = "0.3.0"
+VERSION = "0.4.0"
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DOCS = os.path.join(HERE, "docs")
@@ -47,6 +47,18 @@ class Job:
         self.total = 0
         self.started = 0.0
         self.estimate_s = 0.0
+        self.port = None
+
+    def holds_port(self, device: str) -> bool:
+        """True while a plot has this device open, so nothing probes it.
+
+        Opening a board's serial port mid-plot to ask its name would fight the
+        driver for the port. When the running job did not name a port, treat
+        every board as busy: we cannot tell which one the driver picked.
+        """
+        if self.state != "running":
+            return False
+        return self.port is None or self.port == device
 
     def snapshot(self) -> dict:
         elapsed = time.time() - self.started if self.started else 0.0
@@ -117,7 +129,47 @@ def check_claims(points, model: int) -> tuple[bool, list]:
     return bool(ok), out
 
 
-def plot_worker(points, model, speed, pen_up, pen_down, preview, accel=75):
+EBB_VID_PID = (0x04D8, 0xFD92)
+
+
+def list_boards():
+    """Find every EiBotBoard attached, and ask each one its name.
+
+    These boards report no USB serial number, and two of them produce an
+    identical /dev/serial/by-id entry, so only one symlink survives. udev
+    rules keyed on serial number cannot tell them apart. The EBB stores a
+    nickname in its own EEPROM instead (ST sets it, QT reads it), which
+    survives replugging and does not care which ttyACM it enumerated as.
+    """
+    import serial
+    import serial.tools.list_ports as lp
+
+    out = []
+    for p in sorted(lp.comports(), key=lambda x: x.device):
+        if (p.vid, p.pid) != EBB_VID_PID:
+            continue
+        nickname = ""
+        if not job.holds_port(p.device):
+            try:
+                with serial.Serial(p.device, 9600, timeout=1.5) as sp:
+                    time.sleep(0.15)
+                    sp.reset_input_buffer()
+                    sp.write(b"QT\r")
+                    time.sleep(0.3)
+                    reply = sp.read(100).decode(errors="replace").strip()
+                    first = reply.splitlines()[0].strip() if reply else ""
+                    # A board with no nickname answers with a bare OK.
+                    nickname = "" if first in ("", "OK") else first
+            except Exception:
+                nickname = ""
+        out.append({"device": p.device, "nickname": nickname,
+                    "busy": job.holds_port(p.device),
+                    "label": nickname or p.device})
+    return out
+
+
+def plot_worker(points, model, speed, pen_up, pen_down, preview, accel=75,
+                port=None):
     from pyaxidraw import axidraw
 
     ad = axidraw.AxiDraw()
@@ -132,8 +184,13 @@ def plot_worker(points, model, speed, pen_up, pen_down, preview, accel=75):
         o.pen_pos_down = pen_down
         o.accel = accel
 
+        if port:
+            o.port = port
         if not ad.connect():
-            job.state, job.message = "error", "no AxiDraw found on the USB port"
+            job.state, job.message = "error", (
+                f"could not open {port}" if port else
+                "no AxiDraw found. If more than one is attached, pick which "
+                "board to use: with several plugged in the driver cannot choose.")
             return
 
         job.message = "pen up, moving to start"
@@ -204,6 +261,11 @@ def info():
     })
 
 
+@app.get("/api/boards")
+def boards():
+    return jsonify({"boards": list_boards()})
+
+
 @app.get("/api/status")
 def status():
     return jsonify(job.snapshot())
@@ -260,11 +322,13 @@ def plot():
         job.done = 0
         job.total = len(points) - 1
         job.started = time.time()
+        job.port = body.get("port") or None
         job.thread = threading.Thread(
             target=plot_worker,
             args=(points, model, int(body.get("speed", 25)),
                   int(body.get("pen_up", 60)), int(body.get("pen_down", 40)),
-                  bool(body.get("preview", True)), int(body.get("accel", 75))),
+                  bool(body.get("preview", True)), int(body.get("accel", 75)),
+                  body.get("port") or None),
             daemon=True)
         job.thread.start()
     return jsonify({"ok": True, "message": "plotting", "segments": job.total})
