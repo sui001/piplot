@@ -202,11 +202,9 @@
     <div class="row"><label for="speed">speed</label>
       <input type="range" id="speed" min="5" max="100" step="1" value="25"><output id="speedV"></output></div>
     <div class="row"><label for="penDown">pen down</label>
-      <input type="range" id="penDown" min="0" max="100" step="1" value="20"><output id="penDownV"></output></div>
-    <div class="note">If the pen will not reach the paper until this is near 0,
-      the pen is too high in the holder. At 0 the servo is against its stop with
-      no travel left, so pressure depends entirely on the clamp. Slide the pen
-      down a few millimetres and work around 20 to 25 instead.</div>
+      <input type="range" id="penDown" min="0" max="100" step="1" value="0"><output id="penDownV"></output></div>
+    <div class="note">Defaults to 0, fully down, which is how this machine is
+      set up. Raise it if you fit a longer pen or want lighter contact.</div>
     <div class="row"><label for="penUp">pen up</label>
       <input type="range" id="penUp" min="0" max="100" step="1" value="60"><output id="penUpV"></output></div>
     <div class="row"><label for="prev">pre-lap</label>

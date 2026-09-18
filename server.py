@@ -425,7 +425,7 @@ def plot():
         job.thread = threading.Thread(
             target=plot_worker,
             args=(points, model, int(body.get("speed", 25)),
-                  int(body.get("pen_up", 60)), int(body.get("pen_down", 40)),
+                  int(body.get("pen_up", 60)), int(body.get("pen_down", 0)),
                   bool(body.get("preview", True)), int(body.get("accel", 75)),
                   body.get("port") or None),
             daemon=True)

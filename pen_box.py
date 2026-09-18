@@ -75,7 +75,7 @@ def main() -> int:
     p.add_argument("--inset", type=float, default=20.0, help="mm in from the edge")
     p.add_argument("--speed", type=int, default=25, help="pen-down speed percent")
     p.add_argument("--pen-up", type=int, default=60)
-    p.add_argument("--pen-down", type=int, default=40)
+    p.add_argument("--pen-down", type=int, default=0)
     p.add_argument("--no-preview", action="store_true",
                    help="skip the pen-up lap and go straight to drawing")
     p.add_argument("--dry", action="store_true",

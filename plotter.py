@@ -100,7 +100,7 @@ class AxiDraw(Plotter):
     """pyaxidraw in interactive mode, talking to the EBB over USB serial."""
 
     def __init__(self, speed_pendown: int = 25, speed_penup: int = 75,
-                 pen_pos_down: int = 40, pen_pos_up: int = 60,
+                 pen_pos_down: int = 0, pen_pos_up: int = 60,
                  port: Optional[str] = None, model: int = 1,
                  accel: int = 75, const_speed: bool = False):
         self.ad = None
