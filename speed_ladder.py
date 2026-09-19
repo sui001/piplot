@@ -149,28 +149,36 @@ def run_grbl(args, cells, travel, varying) -> int:
     print("the carriage's current position becomes 0,0, so it must be parked "
           "at the bottom left")
     results = []
-    original_accel = None
+    original: dict = {}
     try:
         g.connect()
-        if varying == "accel":
+        if varying in ("accel", "rate"):
             # Remember what the board had, because a ladder that is stopped
             # partway would otherwise leave the machine running at whatever the
-            # last cell wrote, and nothing would say so. $120 is not a setting
-            # anyone checks before the next plot.
+            # last cell wrote, and nothing would say so. $110 and $120 are not
+            # settings anyone checks before the next plot.
             for ln in g._send("$$", 1.8).splitlines():
-                if ln.strip().startswith("$120="):
-                    original_accel = ln.strip().split("=", 1)[1]
-            print(f"board acceleration is {original_accel}, will be put back at the end")
+                ln = ln.strip()
+                for key in ("$110=", "$120="):
+                    if ln.startswith(key):
+                        original[key] = ln.split("=", 1)[1]
+            print(f"board had max rate {original.get('$110=')} and "
+                  f"acceleration {original.get('$120=')}, both restored at the end")
         for shown, sp, ac, paths in cells:
             g.feed = sp
-            if varying == "accel":
-                # Acceleration is not a per-job option here the way it is on an
-                # AxiDraw. It lives in the board's EEPROM, so laddering it means
-                # writing $120/$121 between cells, which GRBL only accepts while
-                # idle. draw_path leaves it idle, so this is safe here and
-                # nowhere else in the loop.
+            if varying in ("accel", "rate"):
+                # Neither of these is a per-job option here the way they are on
+                # an AxiDraw. Both live in the board's EEPROM, so laddering
+                # them means writing settings between cells, which GRBL only
+                # accepts while idle. draw_path leaves it idle, so this is safe
+                # here and nowhere else in the loop.
                 for axis in (120, 121):
                     g._send(f"${axis}={ac}", 0.25)
+                if varying == "rate":
+                    # Without this the feed is clamped to the old $110 and the
+                    # extra acceleration only reaches the same ceiling sooner.
+                    for axis in (110, 111):
+                        g._send(f"${axis}={sp}", 0.25)
                 # Too much acceleration makes a CoreXY skip a belt tooth, and a
                 # skip does not announce itself: the board keeps counting steps
                 # it never took. The sheet is the detector. A cell drawn after a
@@ -189,6 +197,19 @@ def run_grbl(args, cells, travel, varying) -> int:
             print(f" {dt:6.1f}s   {mm / dt:5.1f} mm/s actual")
             results.append((shown, mm, dt))
     finally:
+        try:
+            if original:
+                print("putting the board's settings back")
+                for key, was in original.items():
+                    n = int(key.strip("$="))
+                    for axis in (n, n + 1):
+                        g._send(f"${axis}={was}", 0.25)
+        except Exception as exc:
+            # Say so loudly. A machine left at a ladder's top setting is a
+            # trap for whoever plots next, and the backup file is the fix.
+            print(f"COULD NOT RESTORE SETTINGS: {exc}. Put them back with "
+                  f"grbl_probe.py --restore grbl-corexy-a3.settings",
+                  file=sys.stderr)
         g.disconnect()
         lock.__exit__(None, None, None)
 
@@ -212,6 +233,12 @@ def main() -> int:
                    help="grbl only: the envelope, since GRBL does not know its own")
     p.add_argument("--paper", type=mm_pair, default=(420.0, 297.0))
     p.add_argument("--margin", type=float, default=18.0)
+    p.add_argument("--pairs", default=None,
+                   help="ladder max rate AND acceleration together, as "
+                        "rate:accel pairs, e.g. 5000:1500,11000:5000")
+    p.add_argument("--region", default=None, metavar="X0,Y0,X1,Y1",
+                   help="confine the grid to this rectangle in paper mm, so a "
+                        "second ladder fits in the gutters of a used sheet")
     p.add_argument("--merge", action="store_true",
                    help="chain strokes that meet end to end, cutting pen lifts")
     p.add_argument("--detail", type=float, default=1.0,
@@ -231,7 +258,17 @@ def main() -> int:
 
     # Acceleration is usually the control that changes the clock, since short
     # segments never reach the commanded speed, so the same rig ladders either.
-    if args.accels:
+    if args.pairs:
+        # Rate and acceleration are coupled, so laddering one alone stalls.
+        # Measured: at $110=5000 the feed is pinned to the cap, and accel 1500
+        # to 3000 bought 3% because both were arriving at the same ceiling.
+        cells_spec = []
+        for tok in args.pairs.split(","):
+            rate, acc = (int(v) for v in tok.split(":"))
+            cells_spec.append((rate, rate, acc))
+        vals = [c[0] for c in cells_spec]
+        varying = "rate"
+    elif args.accels:
         vals = [int(v) for v in args.accels.split(",") if v.strip()]
         cells_spec = [(v, args.speed, v) for v in vals]
         varying = "accel"
@@ -260,8 +297,17 @@ def main() -> int:
     slots = args.slots or (len(speeds) + args.skip)
     cols = min(args.cols, slots)
     rows = math.ceil(slots / cols)
-    cw = (pw - 2 * args.margin) / cols
-    ch = (ph - 2 * args.margin) / rows
+    # The grid normally fills the sheet inside the margin, but --region pins it
+    # to any rectangle. That is what lets a second ladder go in the gutters
+    # between the cells of the first: a part used sheet has plenty of clean
+    # paper left, and small cells are cheap to draw.
+    if args.region:
+        rx0, ry0, rx1, ry1 = (float(v) for v in args.region.split(","))
+    else:
+        rx0, ry0 = args.margin, args.margin
+        rx1, ry1 = pw - args.margin, ph - args.margin
+    cw = (rx1 - rx0) / cols
+    ch = (ry1 - ry0) / rows
     lab_h = min(7.0, ch * 0.12)
     size = min(cw, ch - lab_h * 2.2) * 0.86
 
@@ -284,8 +330,8 @@ def main() -> int:
     cells = []
     for i, (shown, sp, ac) in enumerate(cells_spec):
         slot = i + args.skip
-        cx = args.margin + (slot % cols) * cw + cw / 2
-        cy = args.margin + (slot // cols) * ch + ch / 2 + lab_h * 0.6
+        cx = rx0 + (slot % cols) * cw + cw / 2
+        cy = ry0 + (slot // cols) * ch + ch / 2 + lab_h * 0.6
         paths = motif(cx, cy, size, args.detail)
         paths += label(f"{shown}", cx - size * 0.2,
                        cy - size / 2 - lab_h * 1.5, lab_h)
@@ -304,9 +350,22 @@ def main() -> int:
         # past the cap would draw at the same speed and the sheet would look
         # like the machine had stopped improving when really it had stopped
         # being asked for more.
-        c.require("every feed is within the machine's max rate",
-                  all(1 <= v <= 5000 for v in vals),
-                  "over 5000 mm/min is silently clamped by $110/$111")
+        if args.pairs:
+            # $110 is being raised per cell, so the board's current setting is
+            # no longer the limit. The AVR is. GRBL on 16 MHz manages about
+            # 30 kHz of step pulses, and at $100=101 steps/mm that is roughly
+            # 17,800 mm/min. Past it the board does not go faster, it drops
+            # steps, and on a machine with no homing that is silent.
+            ceiling = 30000 / 101.0 * 60
+            c.require("every rate is inside the AVR's step rate ceiling",
+                      all(1 <= v <= ceiling for v in vals),
+                      f"{max(vals)} mm/min needs "
+                      f"{max(vals) / 60 * 101:.0f} steps/s, the board manages "
+                      f"about 30000, so the ceiling is {ceiling:.0f} mm/min")
+        else:
+            c.require("every feed is within the machine's max rate",
+                      all(1 <= v <= 5000 for v in vals),
+                      "over 5000 mm/min is silently clamped by $110/$111")
     else:
         c.require("every value is a usable percentage",
                   all(1 <= v <= 100 for v in vals))
