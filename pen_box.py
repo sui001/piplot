@@ -80,6 +80,8 @@ def main() -> int:
     p.add_argument("--pen-down", type=int, default=0)
     p.add_argument("--no-preview", action="store_true",
                    help="skip the pen-up lap and go straight to drawing")
+    p.add_argument("--port", default=None,
+                   help="board nickname or device path; needed with two machines")
     p.add_argument("--dry", action="store_true",
                    help="check the claims and print the path, move nothing")
     args = p.parse_args()
@@ -138,6 +140,10 @@ def main() -> int:
     o.speed_penup = 75
     o.pen_pos_down = args.pen_down
     o.pen_pos_up = args.pen_up
+    if args.port:
+        # 0, not 1: port_config 1 means "first AxiDraw found", not this one.
+        o.port = args.port
+        o.port_config = 0
 
     device = getattr(args, "port", None) or ""
     lock = hold(device)

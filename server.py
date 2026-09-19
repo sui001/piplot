@@ -28,7 +28,7 @@ from flask import Flask, jsonify, request, send_from_directory
 from pen_box import MODELS  # noqa: E402  the machine travel envelopes
 from portlock import hold  # noqa: E402  one thing at a time on a port
 
-VERSION = "0.6.0"
+VERSION = "0.6.1"
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DOCS = os.path.join(HERE, "docs")
@@ -79,10 +79,6 @@ class Job:
 jobs: dict[str, Job] = {}            # device path -> that board's job
 jobs_lock = threading.Lock()         # guards creating and starting jobs
 
-# Last nickname each device answered with. A board that is mid-plot cannot be
-# probed without killing the drawing, so without this it would lose its name
-# for exactly as long as someone is most likely to ask for it by name.
-NAMES: dict[str, str] = {}
 
 
 def device_busy(device: str) -> bool:
@@ -145,57 +141,48 @@ EBB_VID_PID = (0x04D8, 0xFD92)
 
 
 def list_boards():
-    """Find every EiBotBoard attached, and ask each one its name.
+    """Find every EiBotBoard attached, and its name, without opening any port.
 
-    These boards report no USB serial number, and two of them produce an
-    identical /dev/serial/by-id entry, so only one symlink survives. udev
-    rules keyed on serial number cannot tell them apart. The EBB stores a
-    nickname in its own EEPROM instead (ST sets it, QT reads it), which
-    survives replugging and does not care which ttyACM it enumerated as.
+    A named EBB reports its nickname as its USB serial number once it has
+    re-enumerated, so the name comes straight from the USB descriptor. Opening
+    ports to ask was slow, a second or more per board per request, and it
+    raced: two plots starting together each probed the other's board while
+    that board's own check was trying to read its voltage, and one was refused.
+
+    Only a board that has never been named, and so has no serial number, still
+    gets asked over serial, and only when nothing else holds it.
     """
     import serial
     import serial.tools.list_ports as lp
 
+    CR = chr(13).encode()
     out = []
     for p in sorted(lp.comports(), key=lambda x: x.device):
         if (p.vid, p.pid) != EBB_VID_PID:
             continue
-        nickname = NAMES.get(p.device, "")
         busy = device_busy(p.device)
-        # Probing opens the port, which kills whatever is drawing on it, so
-        # only ask a board its name when nothing else has claimed it. A busy
-        # board keeps the name it last gave.
-        if not busy:
+        nickname = (p.serial_number or "").strip()
+        if not nickname and not busy:
             try:
                 with hold(p.device) as got:
-                    if not got:
-                        raise RuntimeError("in use")
-                    with serial.Serial(p.device, 9600, timeout=1.5) as sp:
-                        time.sleep(0.15)
-                        # A freshly plugged board can have noise sitting in its
-                        # input buffer, and QT then comes back as
-                        # "Err: Unknown command". A bare CR ends whatever half
-                        # command is in there before the real question.
-                        sp.write(b"\r")
-                        time.sleep(0.2)
-                        sp.reset_input_buffer()
-                        sp.write(b"QT\r")
-                        time.sleep(0.3)
-                        reply = sp.read(100).decode(errors="replace").strip()
-                        first = reply.splitlines()[0].strip() if reply else ""
-                        # A board with no nickname answers with a bare OK.
-                        if first in ("", "OK"):
-                            nickname = ""          # genuinely unnamed
-                        elif "Err" in first:
-                            pass                   # noise: keep the cached name
-                        else:
-                            nickname = first
-                            NAMES[p.device] = first
+                    if got:
+                        with serial.Serial(p.device, 9600, timeout=1.5) as sp:
+                            time.sleep(0.15)
+                            sp.write(CR)          # end any half command first
+                            time.sleep(0.2)
+                            sp.reset_input_buffer()
+                            sp.write(b"QT" + CR)
+                            time.sleep(0.3)
+                            reply = sp.read(100).decode(errors="replace").strip()
+                            first = reply.splitlines()[0].strip() if reply else ""
+                            if first not in ("", "OK") and "Err" not in first:
+                                nickname = first
+                    else:
+                        busy = True
             except Exception:
-                busy = True
+                pass
         out.append({"device": p.device, "nickname": nickname,
-                    "busy": busy,
-                    "label": nickname or p.device})
+                    "busy": busy, "label": nickname or p.device})
     return out
 
 
@@ -235,7 +222,7 @@ def board_health(device):
         time.sleep(0.35)
         return sp.read(150).decode(errors="replace").strip()
 
-    with hold(device) as got:
+    with hold(device, wait=3) as got:
         if not got:
             raise RuntimeError("another process is using this board")
         with serial.Serial(device, 9600, timeout=2) as sp:
@@ -321,7 +308,7 @@ def plot_worker(job, points, model, speed, pen_up, pen_down, preview, accel=75):
     device = job.device
     port = device
     ad = axidraw.AxiDraw()
-    lock = hold(device)
+    lock = hold(device, wait=3)
     if not lock.__enter__():
         job.state = "error"
         job.message = (f"{job.label} is in use by something else. A command "
@@ -338,16 +325,27 @@ def plot_worker(job, points, model, speed, pen_up, pen_down, preview, accel=75):
         o.pen_pos_down = pen_down
         o.accel = accel
 
-        if port:
-            # port_config must be 1 or the port is ignored and the driver
-            # autodetects anyway, which is what silently broke nicknames.
-            o.port = port
-            o.port_config = 1
+        # port_config 1 does NOT mean "use the port I named". In the driver it
+        # means "ignore the name and use the first AxiDraw found". Setting it,
+        # as this code did, sent every plot to whichever board enumerated
+        # first: axidraw-1's jobs drew on axidraw-0, and two "simultaneous"
+        # plots fought over one board. 0 is the setting that honours o.port.
+        o.port = port
+        o.port_config = 0
         if not ad.connect():
-            job.state, job.message = "error", (
-                f"could not open {port}" if port else
-                "no AxiDraw found. If more than one is attached, pick which "
-                "board to use: with several plugged in the driver cannot choose.")
+            job.state, job.message = "error", f"could not open {job.label} ({port})"
+            return
+
+        # Ask the board its name before moving anything. This is the claim that
+        # would have caught the port_config bug on the first plot: a board that
+        # answers to the wrong name is the wrong machine, and it gets no ink.
+        answered = (ad.usb_query("QT\r") or "").strip().splitlines()
+        answered = answered[0].strip() if answered else ""
+        if answered.lower() != job.label.lower() and job.label != port:
+            job.state = "error"
+            job.message = (f"refused: asked for {job.label}, but the board that "
+                           f"answered is {answered or 'unnamed'}")
+            ad.disconnect()
             return
 
         job.message = "pen up, moving to start"

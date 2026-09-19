@@ -201,7 +201,7 @@ def main() -> int:
     o.speed_penup = 75
     if args.port:
         o.port = args.port
-        o.port_config = 1      # without this the named port is ignored
+        o.port_config = 0      # 1 would mean "first AxiDraw found", not this one
     device = args.port or ""
     lock = hold(device)
     if not lock.__enter__():

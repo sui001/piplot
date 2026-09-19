@@ -1,23 +1,30 @@
 """One thing at a time on a serial port.
 
-Board discovery opens each port to ask its nickname. That is fine until
+Board discovery used to open each port to ask its nickname. That is fine until
 something else is mid-plot on it, at which point the probe kills the drawing:
 reloading the web page took out a running plot exactly this way, and neither
 end had any idea the other existed.
 
 An advisory flock per device fixes it, because it works across processes. The
-server holds it for the length of a plot, discovery takes it only if nobody
-else has it, and the command line tools take it before they connect.
+server holds it for the length of a plot, and the command line tools take it
+before they connect.
 
-    with hold("/dev/ttyACM0") as got:
+    with hold("axidraw-0", wait=3) as got:
         if not got:
             ...   # someone else is using this board
+
+The lock is keyed on the real device path, whatever name the caller used. The
+command line tools used to lock "axidraw-0" while the server locked
+"/dev/ttyACM0", which are two different lock files, so the two never actually
+excluded each other.
 """
 
 from __future__ import annotations
 
 import contextlib
+import glob
 import os
+import time
 
 try:
     import fcntl
@@ -28,32 +35,54 @@ except ImportError:      # Windows, where these tools only ever dry-run
 LOCK_DIR = "/tmp"
 
 
+def canonical(name: str) -> str:
+    """The real device path for a nickname, a by-id link or a device path.
+
+    A named EiBotBoard reports its nickname as its USB serial number, so udev
+    gives it a stable /dev/serial/by-id link with the name in it. That is how a
+    nickname is turned into a device without opening any port.
+    """
+    if not name:
+        return name
+    if not name.startswith("/"):
+        hits = glob.glob(f"/dev/serial/by-id/*EiBotBoard_{name}_*")
+        if not hits:
+            return name
+        name = hits[0]
+    return os.path.realpath(name)
+
+
 def lock_path(device: str) -> str:
     return os.path.join(LOCK_DIR, "piplot-" + device.replace("/", "_") + ".lock")
 
 
 @contextlib.contextmanager
-def hold(device: str, blocking: bool = False):
+def hold(device: str, wait: float = 0.0):
     """Yield True if this process now owns the device, False if someone else does.
 
-    Never raises on contention: a caller that cannot get the lock should say
-    so and carry on, not crash. The lock is advisory, so it only works because
-    everything that touches a board goes through here.
+    wait retries for that many seconds before giving up, which is for checks
+    that only need the port briefly and would otherwise lose to another short
+    check by a fraction of a second. Never raises on contention.
     """
     if not HAVE_FLOCK or not device:
         yield True
         return
 
+    device = canonical(device)
     fd = None
     got = False
     try:
         fd = os.open(lock_path(device), os.O_CREAT | os.O_RDWR, 0o666)
-        flags = fcntl.LOCK_EX if blocking else (fcntl.LOCK_EX | fcntl.LOCK_NB)
-        try:
-            fcntl.flock(fd, flags)
-            got = True
-        except (BlockingIOError, OSError):
-            got = False
+        deadline = time.time() + wait
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                got = True
+                break
+            except (BlockingIOError, OSError):
+                if time.time() >= deadline:
+                    break
+                time.sleep(0.1)
         yield got
     finally:
         if fd is not None:
