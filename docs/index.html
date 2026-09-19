@@ -541,7 +541,12 @@ function fitToPaper(pts) {
     if (py > y1) y1 = py;
   }
   const w = x1 - x0 || 1, h = y1 - y0 || 1;
-  const s = Math.min((pw - 2*m) / w, (ph - 2*m) / h);
+  // A number input is momentarily empty while it is being retyped, which made
+  // pw zero, which made this scale NEGATIVE and flung the drawing off the
+  // canvas. It looked exactly like the page had died. Clamp instead: a
+  // nonsense paper size is a transient, not an instruction.
+  const usableW = Math.max(1, pw - 2*m), usableH = Math.max(1, ph - 2*m);
+  const s = Math.min(usableW / w, usableH / h);
   const ox = (pw - w*s)/2, oy = (ph - h*s)/2;
   return { pts: pts.map(p => [(p[0]-x0)*s + ox, (p[1]-y0)*s + oy]),
            w: w*s, h: h*s, pw, ph };
@@ -983,6 +988,17 @@ function machineTravel() {
   return m ? [m.x, m.y] : null;
 }
 
+// Picking a machine sets the paper to that machine. The two used to be
+// independent, so choosing the 297x420 portrait machine left a 420x297
+// landscape page beside it and every plot was refused for not fitting.
+// Still editable afterwards, for a smaller sheet on a bigger machine.
+function adoptMachinePaper() {
+  const m = MACHINES[$("board").value];
+  if (!m) return;
+  $("pw").value = m.x;
+  $("ph").value = m.y;
+}
+
 function showEnvelope() {
   const name = $("board").value, m = MACHINES[name];
   const el = $("envelope");
@@ -1037,7 +1053,9 @@ function showEnvelope() {
       "Run server.py on a Pi wired to a plotter to draw it.");
   }
   await refreshBoards();
-  $("board").addEventListener("change", () => { showEnvelope(); poll(); });
+  $("board").addEventListener("change", () => {
+    adoptMachinePaper(); showEnvelope(); render(); poll();
+  });
   $("bCheck").onclick = check;
   $("bPlot").onclick = plot;
   $("bStop").onclick = stopPlot;

@@ -891,7 +891,10 @@ function fitScale(paths) {
   const [x0, y0, x1, y1] = bboxOf(paths);
   let w = (x1 - x0) || 1, h = (y1 - y0) || 1;
   if ($("rot90").checked) [w, h] = [h, w];
-  return Math.min((pw - 2*m) / w, (ph - 2*m) / h);
+  // Clamped, because a number input is momentarily empty while it is being
+  // retyped and a zero page gives a NEGATIVE scale, which throws the drawing
+  // off the canvas and looks like the page has died.
+  return Math.min(Math.max(1, pw - 2*m) / w, Math.max(1, ph - 2*m) / h);
 }
 
 // The same fit as the curve studio: origin at the home corner, y down, and the
@@ -903,7 +906,7 @@ function fitToPaper(paths) {
   if ($("rot90").checked) ps = ps.map(p => p.map(q => [q[1], -q[0]]));
   const [x0, y0, x1, y1] = bboxOf(ps);
   const w = (x1 - x0) || 1, h = (y1 - y0) || 1;
-  const s = Math.min((pw - 2*m) / w, (ph - 2*m) / h);
+  const s = Math.min(Math.max(1, pw - 2*m) / w, Math.max(1, ph - 2*m) / h);
   const ox = (pw - w*s)/2, oy = (ph - h*s)/2;
   return { paths: ps.map(p => p.map(q => [(q[0]-x0)*s + ox, (q[1]-y0)*s + oy])),
            w: w*s, h: h*s, pw, ph };
@@ -1335,6 +1338,17 @@ const OFFLINE_MACHINES = {
 let DEMO = false;
 let MACHINES = {};
 
+// Picking a machine sets the paper to that machine. The two used to be
+// independent, so choosing the 297x420 portrait machine left a 420x297
+// landscape page beside it and every plot was refused for not fitting.
+// Still editable afterwards, for a smaller sheet on a bigger machine.
+function adoptMachinePaper() {
+  const m = MACHINES[$("board").value];
+  if (!m) return;
+  $("pw").value = m.x;
+  $("ph").value = m.y;
+}
+
 function showEnvelope() {
   const name = $("board").value, m = MACHINES[name];
   const el = $("envelope");
@@ -1435,7 +1449,9 @@ async function fileChosen(e) {
     }
   }
   await refreshBoards();
-  $("board").addEventListener("change", () => { showEnvelope(); poll(); });
+  $("board").addEventListener("change", () => {
+    adoptMachinePaper(); showEnvelope(); render(); poll();
+  });
   $("bCheck").onclick = check;
   $("bPlot").onclick = plot;
   $("bStop").onclick = stopPlot;
