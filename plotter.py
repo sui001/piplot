@@ -243,6 +243,14 @@ class Grbl(Plotter):
     - **y runs up the page.** Origin is the bottom left corner with +Y away
       from the operator, while piplot's paper frame is y down the page. So the
       mapping is flipped here, once, rather than at every call site.
+
+    **There is no travel speed setting here, and that is deliberate.** Pen-up
+    moves are G0 rapids, and a G0 ignores F entirely: it runs at the board's
+    own `$110/$111`. So the two speeds are already separate levers, and they
+    want different values, because only pen-down moves have to look good.
+    Laddered on paper on 19 Sep, drawing went bad somewhere between 5000 and
+    8000 mm/min, but travel has no such limit. The machine is set to
+    `$110/$111 = 11000` for travel with `feed = 5000` for ink.
     """
 
     # $I reports the real figure as the third field of OPT. Undersizing it only
@@ -252,8 +260,8 @@ class Grbl(Plotter):
     def __init__(self, port: str = "/dev/ttyUSB0", baud: int = 115200,
                  travel: Tuple[float, float] = (420.0, 297.0),
                  pen_up_z: float = 1.0, pen_down_z: float = 0.0,
-                 pen_dwell_s: float = 0.25, feed: int = 3000,
-                 travel_feed: int = 5000, flip_y: bool = True):
+                 pen_dwell_s: float = 0.25, feed: int = 5000,
+                 flip_y: bool = True):
         self.sp = None
         self.port = port
         self.baud = baud
@@ -262,7 +270,6 @@ class Grbl(Plotter):
         self.pen_down_z = pen_down_z
         self.pen_dwell_s = pen_dwell_s
         self.feed = feed
-        self.travel_feed = travel_feed
         self.flip_y = flip_y
         self.down = False
 
