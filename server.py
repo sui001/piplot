@@ -28,7 +28,7 @@ from flask import Flask, jsonify, request, send_from_directory
 from pen_box import MODELS  # noqa: E402  the machine travel envelopes
 from portlock import hold  # noqa: E402  one thing at a time on a port
 
-VERSION = "0.6.1"
+VERSION = "0.6.2"
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DOCS = os.path.join(HERE, "docs")
@@ -386,7 +386,11 @@ def plot_worker(job, points, model, speed, pen_up, pen_down, preview, accel=75):
                                     daemon=True)
             prog.start()
             ad.draw_path(vertices)
-            job.done = job.total
+            # Only a path that ran to the end is complete. draw_path also
+            # returns when stopped, and marking that as all segments done made
+            # a stop at 10 of 40 report "stopped after 40 of 40".
+            if not job.stop.is_set():
+                job.done = job.total
 
         job.message = "returning home"
         ad.moveto(0, 0)
