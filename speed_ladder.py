@@ -135,7 +135,7 @@ def run_grbl(args, cells, travel, varying) -> int:
     seconds in every cell. That flattens the ratios at the fast end: the cells
     stop looking faster long before the machine stops going faster.
     """
-    from plotter import Grbl
+    from plotter import Grbl, merge_paths
 
     device = args.port or "/dev/ttyUSB0"
     g = Grbl(port=device, travel=travel)
@@ -178,9 +178,12 @@ def run_grbl(args, cells, travel, varying) -> int:
                 # ladder for displacement as much as for line quality.
             mm = sum(math.dist(path[i - 1], path[i])
                      for path in paths for i in range(1, len(path)))
-            print(f"  {shown:5}  ({sp} mm/min)  {mm:.0f} mm ...", end="", flush=True)
+            drawn = merge_paths(paths) if args.merge else paths
+            lifts = f"{len(paths)}->{len(drawn)} lifts" if args.merge else f"{len(paths)} lifts"
+            print(f"  {shown:5}  ({sp} mm/min)  {mm:.0f} mm  {lifts} ...",
+                  end="", flush=True)
             t0 = time.time()
-            for path in paths:
+            for path in drawn:
                 g.draw_path(path)
             dt = time.time() - t0
             print(f" {dt:6.1f}s   {mm / dt:5.1f} mm/s actual")
@@ -209,6 +212,8 @@ def main() -> int:
                    help="grbl only: the envelope, since GRBL does not know its own")
     p.add_argument("--paper", type=mm_pair, default=(420.0, 297.0))
     p.add_argument("--margin", type=float, default=18.0)
+    p.add_argument("--merge", action="store_true",
+                   help="chain strokes that meet end to end, cutting pen lifts")
     p.add_argument("--detail", type=float, default=1.0,
                    help="thin the rosette and hatch, 1.0 is the full pattern")
     p.add_argument("--cols", type=int, default=3)

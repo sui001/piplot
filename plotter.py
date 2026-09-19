@@ -14,6 +14,46 @@ import time
 from typing import Optional, Tuple
 
 
+def merge_paths(paths, tol: float = 0.05) -> list:
+    """Chain paths that meet end to end, so the pen lifts once instead of twice.
+
+    Sorting strokes cuts the travel between them but not the number of lifts,
+    and on the GRBL machine a lift is the expensive part: a Z move plus a
+    dwell each way, about 0.8 s, paid per path however short the path is.
+    Measured on the speed ladder, lifts were roughly a third of the run.
+
+    Seven segment digits are the worst case. `label()` emits every stroke on
+    its own, so an 8 is seven paths and seven lifts to put down about 20 mm of
+    ink. Chained, it is one or two.
+
+    Greedy: take the next path, then keep extending it with any path whose
+    start, or whose end reversed, lands within tol of the current end. tol is
+    mm and should be smaller than a gap anyone would see. Reversing is safe
+    because a stroke drawn backwards leaves the same mark.
+    """
+    remaining = [list(p) for p in paths if p and len(p) >= 2]
+    out = []
+    while remaining:
+        cur = remaining.pop(0)
+        joined = True
+        while joined:
+            joined = False
+            ex, ey = cur[-1]
+            for i, p in enumerate(remaining):
+                sx, sy = p[0]
+                if abs(sx - ex) <= tol and abs(sy - ey) <= tol:
+                    cur.extend(p[1:])
+                elif abs(p[-1][0] - ex) <= tol and abs(p[-1][1] - ey) <= tol:
+                    cur.extend(list(reversed(p))[1:])
+                else:
+                    continue
+                remaining.pop(i)
+                joined = True
+                break
+        out.append(cur)
+    return out
+
+
 class Plotter:
     def connect(self) -> None:
         pass
@@ -370,23 +410,61 @@ class Grbl(Plotter):
                 pending.pop(0)
         return True
 
+    def encode(self, points) -> list:
+        """The path as the shortest G-code that means the same thing.
+
+        This is a speed control, not tidiness. GRBL's planner decides how fast
+        it dares go from the moves it can already see, and it can only see what
+        fits in a 128 byte receive buffer. At `G1 X123.456 Y789.012 F3000`, 26
+        bytes a move, that is four moves of lookahead, so the planner is always
+        planning to stop within about 2 mm and never commits to speed. Measured
+        on the CoreXY machine: 1000, 2500 and 5000 mm/min gave 6.6, 9.4 and
+        10.1 mm/s actual. Asking for five times the feed bought half again the
+        speed, because feed was never the thing in the way.
+
+        Three savings, none of which lose anything:
+
+        - Modal codes. G1 persists, so only the first move needs it.
+        - No spaces, and F only when it changes.
+        - Two decimals. At 101 steps/mm one step is 0.0099 mm, so 0.01 mm is
+          the machine's own resolution. The third decimal was never real.
+
+        `X123.46Y789.01` is 14 bytes, which is nine moves of lookahead instead
+        of four. A point that rounds onto its predecessor is dropped, since a
+        move to where the head already is still costs a planner block.
+        """
+        fx, fy = self._xy(*points[0])
+        out = [f"G0Z{self.pen_up_z:g}",
+               f"G0X{fx:.2f}Y{fy:.2f}",
+               f"G4P{self.pen_dwell_s:g}",
+               f"G0Z{self.pen_down_z:g}",
+               f"G4P{self.pen_dwell_s:g}"]
+        lsx, lsy = f"{fx:.2f}", f"{fy:.2f}"
+        need_code = True
+        for x, y in points[1:]:
+            mx, my = self._xy(x, y)
+            sx, sy = f"{mx:.2f}", f"{my:.2f}"
+            parts = []
+            if sx != lsx:
+                parts.append("X" + sx)
+            if sy != lsy:
+                parts.append("Y" + sy)
+            if not parts:
+                continue
+            if need_code:
+                parts = ["G1"] + parts + [f"F{self.feed}"]
+                need_code = False
+            out.append("".join(parts))
+            lsx, lsy = sx, sy
+        out.append(f"G0Z{self.pen_up_z:g}")
+        return out
+
     def draw_path(self, points, stop_event=None) -> bool:
         bad = self.check(points)
         if bad:
             raise ValueError("refusing to move: " + "; ".join(bad))
 
-        first = self._xy(*points[0])
-        lines = [f"G0 Z{self.pen_up_z:g}",
-                 f"G0 X{first[0]:.3f} Y{first[1]:.3f}",
-                 f"G4 P{self.pen_dwell_s:g}",
-                 f"G0 Z{self.pen_down_z:g}",
-                 f"G4 P{self.pen_dwell_s:g}"]
-        for x, y in points[1:]:
-            mx, my = self._xy(x, y)
-            lines.append(f"G1 X{mx:.3f} Y{my:.3f} F{self.feed}")
-        lines.append(f"G0 Z{self.pen_up_z:g}")
-
-        finished = self._stream(lines, stop_event)
+        finished = self._stream(self.encode(points), stop_event)
         if not finished:
             self._halt()
         else:
