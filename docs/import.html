@@ -174,11 +174,16 @@
     <h2>paper and pen</h2>
     <div class="row"><label for="board">plotter</label>
       <select id="board" style="grid-column: 2 / span 2"></select></div>
-    <div class="row"><label for="model">machine</label>
-      <select id="model" style="grid-column: 2 / span 2"></select></div>
+    <div class="note" id="envelope">pick a plotter to see its travel</div>
     <div class="row"><label for="pw">paper</label>
       <input type="number" id="pw" value="420" style="grid-column:2">
       <input type="number" id="ph" value="297"></div>
+    <div class="row"><label for="parked">parked</label>
+      <input type="checkbox" id="parked" style="justify-self:start"><output></output></div>
+    <div class="note">None of these machines has home switches, not even the
+      AxiDraws. Each takes wherever its carriage is standing as (0, 0), so park
+      it in its home corner and tick this. Nothing in software can check it,
+      which is why it is asked every time.</div>
     <div class="row"><label for="margin">margin</label>
       <input type="range" id="margin" min="0" max="60" step="1" value="20"><output id="marginV"></output></div>
     <div class="row"><label for="rot90">rotate</label>
@@ -1182,9 +1187,12 @@ const flatPoints = () => CUR.paths.flat();
 const payload = () => ({
   ...($("join").checked || CUR.paths.length < 2
       ? { points: flatPoints() } : { paths: CUR.paths }),
-  port: $("board").value, nib: CUR.nib, model: +$("model").value,
+  // No model number any more. The server takes the envelope from whichever
+  // machine is chosen, so an A0 page can no longer be aimed at the A4 machine.
+  port: $("board").value, nib: CUR.nib,
   speed: +$("speed").value, pen_up: +$("penUp").value,
-  pen_down: +$("penDown").value, preview: $("prev").checked });
+  pen_down: +$("penDown").value, preview: $("prev").checked,
+  origin_confirmed: $("parked").checked });
 
 const showClaims = cl => $("claims").innerHTML = (cl||[]).map(c =>
   `<div class="${c.ok?"ok":"no"}">${c.label}${c.detail?"  ·  "+c.detail:""}</div>`).join("");
@@ -1226,6 +1234,10 @@ async function plot() {
   const d = await post("/api/plot");
   if (!d) return;
   if (!d.ok) { showClaims(d.claims); setStatus("error", d.message); return; }
+  // Spend the parked tick. It asserts where the carriage is right now, and
+  // the plot that follows moves it, so leaving it on makes it a default
+  // rather than a deliberate check.
+  $("parked").checked = false;
   showClaims([]); poll();
 }
 
@@ -1257,6 +1269,7 @@ async function refreshBoards() {
       bs.map(b => `<option value="${b.nickname || b.device}">` +
         `${b.label}${b.busy ? " (busy)" : ""}</option>`).join("");
     if ([...sel.options].some(o => o.value === keep)) sel.value = keep;
+    showEnvelope();
   } catch (e) {
     sel.innerHTML = '<option value="">could not list</option>';
   }
@@ -1314,14 +1327,25 @@ function downloadSvg() {
 // The same file is served by server.py next to a real plotter and by GitHub
 // Pages with nothing behind it. All the importing and interpreting runs in the
 // browser, so the only thing missing without a server is the plotting itself.
-const OFFLINE_MODELS = {
-  1:{name:"AxiDraw V2 / V3 / SE-A4",x:300,y:218}, 2:{name:"AxiDraw V3-A3 / SE-A3",x:430,y:297},
-  3:{name:"AxiDraw V3 XLX",x:595,y:218},          4:{name:"AxiDraw MiniKit",x:160,y:101},
-  5:{name:"AxiDraw SE-A1",x:864,y:594},           6:{name:"AxiDraw SE-A2",x:594,y:432},
-  7:{name:"AxiDraw V3-B6",x:180,y:140},           8:{name:"A1 plotter",x:841,y:594},
-  9:{name:"A0 plotter",x:1189,y:841},
+const OFFLINE_MACHINES = {
+  "axidraw-0": {x:430, y:297, driver:"axidraw", attached:false},
+  "axidraw-1": {x:430, y:297, driver:"axidraw", attached:false},
+  "suidraw-0": {x:297, y:420, driver:"grbl",    attached:false},
 };
 let DEMO = false;
+let MACHINES = {};
+
+function showEnvelope() {
+  const name = $("board").value, m = MACHINES[name];
+  const el = $("envelope");
+  if (!m) { el.textContent = "pick a plotter to see its travel"; return; }
+  const pw = +$("pw").value, ph = +$("ph").value;
+  const over = pw > m.x || ph > m.y;
+  el.innerHTML = `${name} is ${m.driver}, travel ${m.x} x ${m.y} mm` +
+    (m.assumed ? ", size assumed" : "") +
+    (over ? `<br><b class="no">the ${pw} x ${ph} page does not fit this ` +
+            `machine</b>` : "");
+}
 const DEMO_MSG = "Demo mode: import something and download the svg. " +
   "Run server.py on a Pi wired to a plotter to draw it.";
 
@@ -1374,12 +1398,13 @@ async function fileChosen(e) {
     info = await r.json();
   } catch (e) {
     DEMO = true;
-    info = { version: "demo", host: "no plotter", models: OFFLINE_MODELS };
+    info = { version: "demo", host: "no plotter", machines: OFFLINE_MACHINES };
   }
+  MACHINES = info.machines || {};
   $("ver").textContent = "v" + info.version;
   $("host").textContent = info.host;
-  $("model").innerHTML = Object.entries(info.models).map(([k,v]) =>
-    `<option value="${k}" ${k==="2"?"selected":""}>${v.name} (${v.x}x${v.y})</option>`).join("");
+  showEnvelope();
+  for (const id of ["pw", "ph"]) $(id).addEventListener("input", showEnvelope);
 
   $("svgText").value = SAMPLE_SVG;
   $("jsonText").value = SAMPLE_JSON;
@@ -1410,7 +1435,7 @@ async function fileChosen(e) {
     }
   }
   await refreshBoards();
-  $("board").addEventListener("change", () => poll());
+  $("board").addEventListener("change", () => { showEnvelope(); poll(); });
   $("bCheck").onclick = check;
   $("bPlot").onclick = plot;
   $("bStop").onclick = stopPlot;

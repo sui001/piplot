@@ -319,12 +319,27 @@ class Grbl(Plotter):
         return reply.split("<", 1)[1].split("|", 1)[0].split(">", 1)[0].strip()
 
     def _wait_idle(self, timeout: float = 600.0) -> bool:
+        """Block until the machine stops moving, or raise.
+
+        It raises rather than returning False because both callers used to
+        ignore the result and carry on. `disconnect()` would then close the
+        port while the carriage was still moving, and closing the port is a
+        DTR reset: the move is abandoned and the position is lost, on a
+        machine with no homing to recover it. Timing out is not a thing to
+        shrug at here.
+        """
         deadline = time.time() + timeout
         while time.time() < deadline:
-            if self._state().startswith("Idle"):
+            state = self._state()
+            if state.startswith("Idle"):
                 return True
+            if state.startswith("Alarm"):
+                raise RuntimeError("the board is in Alarm, so the position is "
+                                   "no longer trustworthy; re-park the carriage")
             time.sleep(0.2)
-        return False
+        raise TimeoutError(f"the machine was still {self._state()} after "
+                           f"{timeout:.0f}s; not closing the port on a moving "
+                           f"machine, since that would lose its position")
 
     def connect(self) -> None:
         import serial
@@ -338,15 +353,29 @@ class Grbl(Plotter):
         self._send("G90", 0.2)   # absolute
         self._send("G94", 0.2)   # feed is units per minute
 
-        # There is no homing, so wherever the carriage is parked becomes the
-        # origin. G10 L20 rather than G92 deliberately: G92 offsets are wiped by
-        # the soft reset that stopping needs, G10 L20 writes the work offset to
-        # EEPROM and survives it. Park the carriage at the bottom left corner
-        # before connecting, or every coordinate after this is measured from
-        # the wrong place.
-        self._send("G10 L20 P0 X0 Y0 Z0", 0.3)
-
+        # Note what connect() deliberately does NOT do: set the origin. It used
+        # to, on every connect, which is right only when the carriage happens
+        # to be parked. After a stop, an error or a server restart it is
+        # somewhere arbitrary, and zeroing there quietly writes a false origin
+        # to EEPROM, so every later envelope check passes against a frame that
+        # no longer matches the rails. Nothing on this machine would report it.
+        # Setting the origin is now an explicit act: see set_origin_here.
         self.penup()
+
+    def set_origin_here(self) -> None:
+        """Call the carriage's current position (0, 0). Only when it is parked.
+
+        The caller must have confirmed with a human that the carriage really
+        is in the home corner. There are no homing switches, so this is a
+        promise the software cannot check, which is why it is a separate
+        method that has to be asked for rather than something connect() does
+        on your behalf.
+
+        G10 L20 rather than G92 deliberately: G92 offsets are wiped by the
+        soft reset that stopping needs, while G10 L20 writes the work offset
+        to EEPROM and survives it.
+        """
+        self._send("G10 L20 P0 X0 Y0 Z0", 0.3)
 
     # ---- the pen -----------------------------------------------------------
 
@@ -393,6 +422,13 @@ class Grbl(Plotter):
         """
         pending: list[int] = []
         i = 0
+        # A board that stops answering must not be waited on forever. The loop
+        # below retries on an empty read, so without a deadline a wedged board
+        # holds the flock for good and nothing else can ever use the machine.
+        # The clock restarts on every acknowledgement, so a long slow path is
+        # fine and only real silence trips it.
+        quiet_for = 120.0
+        last_progress = time.time()
         while i < len(lines) or pending:
             if stop_event is not None and stop_event.is_set():
                 return False
@@ -407,7 +443,12 @@ class Grbl(Plotter):
                 i += 1
             reply = self.sp.readline().decode(errors="replace").strip()
             if not reply:
+                if time.time() - last_progress > quiet_for:
+                    raise TimeoutError(
+                        f"the board said nothing for {quiet_for:.0f}s with "
+                        f"{len(pending)} moves outstanding")
                 continue
+            last_progress = time.time()
             if reply.startswith("error") or reply.startswith("ALARM"):
                 raise RuntimeError(f"grbl rejected a command: {reply}")
             # Push messages and status reports are not acknowledgements, so

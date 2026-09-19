@@ -36,15 +36,34 @@ LOCK_DIR = "/tmp"
 
 
 def canonical(name: str) -> str:
-    """The real device path for a nickname, a by-id link or a device path.
+    """The real device path for a machine name, a by-id link or a device path.
 
     A named EiBotBoard reports its nickname as its USB serial number, so udev
     gives it a stable /dev/serial/by-id link with the name in it. That is how a
     nickname is turned into a device without opening any port.
+
+    The registry is asked first, because not every machine can be found that
+    way. This used to glob only `*EiBotBoard_<name>_*`, which quietly returned
+    the name unchanged for anything else: `hold("suidraw-0")` locked
+    `/tmp/piplot-suidraw-0.lock` while the server locked
+    `/tmp/piplot-_dev_ttyUSB0.lock`, so the two never excluded each other. That
+    is the same bug described above, reintroduced for the one machine where
+    losing the race costs more than a plot. The GRBL board has no USB serial
+    number at all and is found by its physical socket instead.
     """
     if not name:
         return name
     if not name.startswith("/"):
+        device = None
+        try:
+            import machines
+            device = machines.device_for(name)
+        except Exception:
+            # A missing or broken registry must not stop a tool locking a port
+            # it named explicitly, so fall through to the old behaviour.
+            pass
+        if device:
+            return device
         hits = glob.glob(f"/dev/serial/by-id/*EiBotBoard_{name}_*")
         if not hits:
             return name

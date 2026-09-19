@@ -1,0 +1,50 @@
+{
+  "_comment": [
+    "Copy this to machines.json next to server.py ON THE PI. It is gitignored,",
+    "so it survives a deploy and can be edited without one.",
+    "",
+    "Find the values for a new machine with:",
+    "    ls -l /dev/serial/by-id/ /dev/serial/by-path/",
+    "Use by_id when the board reports a serial number, which a named",
+    "EiBotBoard does because its nickname IS its serial number. Use by_path,",
+    "the physical USB socket, for a board that reports none, like a CH340.",
+    "A by_path entry means the machine must stay in the same socket.",
+    "",
+    "travel is the real usable envelope in mm and is NOT optional. Nothing",
+    "else knows how big a machine is: the AxiDraw model table only covers",
+    "AxiDraws, and a GRBL board's own $130/$131 are usually left at 5000."
+  ],
+
+  "axidraw-0": {
+    "driver": "axidraw",
+    "model": 2,
+    "travel": [430, 297],
+    "by_id": "*EiBotBoard_axidraw-0_*",
+    "speed": 25,
+    "accel": 75,
+    "pen_up": 60,
+    "pen_down": 0
+  },
+
+  "axidraw-1": {
+    "driver": "axidraw",
+    "model": 2,
+    "travel": [430, 297],
+    "by_id": "*EiBotBoard_axidraw-1_*",
+    "speed": 25,
+    "accel": 75,
+    "pen_up": 60,
+    "pen_down": 0
+  },
+
+  "suidraw-0": {
+    "driver": "grbl",
+    "travel": [297, 420],
+    "by_path": "platform-fd500000.pcie-pci-0000:01:00.0-usb-0:1.4:1.0-port0",
+    "feed": 5000,
+    "pen_up_z": 1,
+    "pen_down_z": 0,
+    "pen_dwell_s": 0.25,
+    "flip_y": true
+  }
+}

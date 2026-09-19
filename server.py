@@ -25,10 +25,11 @@ import time
 
 from flask import Flask, abort, jsonify, request, send_from_directory
 
-from pen_box import MODELS  # noqa: E402  the machine travel envelopes
+import machines  # noqa: E402  which machines exist, and how to find them
+from pen_box import MODELS  # noqa: E402  the AxiDraw travel envelopes
 from portlock import hold  # noqa: E402  one thing at a time on a port
 
-VERSION = "0.7.0"
+VERSION = "0.8.0"
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DOCS = os.path.join(HERE, "docs")
@@ -43,9 +44,12 @@ class Job:
     the A3 must never stop the A1 beside it.
     """
 
-    def __init__(self, device: str, label: str) -> None:
+    def __init__(self, device: str, label: str, driver: str = "axidraw",
+                 travel=(430.0, 297.0)) -> None:
         self.device = device
         self.label = label
+        self.driver = driver
+        self.travel = list(travel)
         self.thread: threading.Thread | None = None
         self.stop = threading.Event()
         self.state = "idle"          # idle | running | done | stopped | error
@@ -80,6 +84,17 @@ jobs: dict[str, Job] = {}            # device path -> that board's job
 jobs_lock = threading.Lock()         # guards creating and starting jobs
 
 
+def snapshot_jobs() -> list:
+    """The current jobs as a list, taken under the lock.
+
+    Flask runs threaded, so iterating `jobs` directly while `/api/plot`
+    inserts a new one raises "dictionary changed size during iteration" and
+    turns a routine status poll into a 500. Every read of every job goes
+    through here.
+    """
+    with jobs_lock:
+        return list(jobs.values())
+
 
 def device_busy(device: str) -> bool:
     j = jobs.get(device)
@@ -105,22 +120,35 @@ def path_length(points) -> float:
     return sum(math.dist(points[i - 1], points[i]) for i in range(1, len(points)))
 
 
-def check_claims(points, model: int) -> tuple[bool, list]:
+def check_claims(points, travel, machine_name="") -> tuple[bool, list]:
     """State what makes this path plottable, and refuse rather than warn.
 
-    The AxiDraw has no home switches and no soft limits of its own. Send it a
-    point past the end of the rail and it will drive there, grind, lose steps,
-    and report nothing. So the envelope is checked here, before the motors are
-    enabled, not hoped for.
+    None of these machines has home switches or soft limits of its own. Send
+    one a point past the end of a rail and it will drive there, grind, lose
+    steps, and report nothing. So the envelope is checked here, before the
+    motors are enabled, not hoped for.
+
+    The envelope arrives as the chosen machine's own travel rather than being
+    looked up from a model number. That table only ever described AxiDraws,
+    and it was indexed before its own "is this a machine we know" claim had
+    run, so an unknown number was a 500 instead of a refusal.
     """
-    tx, ty, name = MODELS[model]
     out = []
 
-    def req(label, cond, detail=""):
-        out.append({"label": label, "ok": bool(cond), "detail": detail})
+    def req(label, cond, detail="", ok_detail=""):
+        # The long text explains a failure, so only say it when it failed.
+        out.append({"label": label, "ok": bool(cond),
+                    "detail": ok_detail if cond else detail})
         return bool(cond)
 
     ok = True
+    ok &= req("the machine is one this server knows", bool(travel),
+              f"{machine_name or 'no machine'} is not in machines.json",
+              ok_detail=machine_name)
+    if not travel:
+        return False, out
+    tx, ty = travel
+
     ok &= req("path has at least two points", len(points) >= 2, f"{len(points)} points")
     if len(points) < 2:
         return False, out
@@ -130,77 +158,64 @@ def check_claims(points, model: int) -> tuple[bool, list]:
     ok &= req("every point is a finite number",
               all(math.isfinite(v) for v in xs + ys))
     ok &= req("x stays within travel", min(xs) >= 0 and max(xs) <= tx,
-              f"x spans {min(xs):.1f} to {max(xs):.1f} mm, machine has 0 to {tx:.0f}")
+              f"x spans {min(xs):.1f} to {max(xs):.1f} mm, "
+              f"{machine_name or 'the machine'} has 0 to {tx:.0f}")
     ok &= req("y stays within travel", min(ys) >= 0 and max(ys) <= ty,
-              f"y spans {min(ys):.1f} to {max(ys):.1f} mm, machine has 0 to {ty:.0f}")
-    ok &= req("machine is one this code knows", model in MODELS, name)
+              f"y spans {min(ys):.1f} to {max(ys):.1f} mm, "
+              f"{machine_name or 'the machine'} has 0 to {ty:.0f}")
     return bool(ok), out
 
 
-EBB_VID_PID = (0x04D8, 0xFD92)
-
-
 def list_boards():
-    """Find every EiBotBoard attached, and its name, without opening any port.
+    """Every machine in the registry, with its device, read from udev only.
 
-    A named EBB reports its nickname as its USB serial number once it has
-    re-enumerated, so the name comes straight from the USB descriptor. Opening
-    ports to ask was slow, a second or more per board per request, and it
-    raced: two plots starting together each probed the other's board while
-    that board's own check was trying to read its voltage, and one was refused.
+    This used to scan USB ids and then OPEN THE PORT of any board with no
+    serial number to ask its name over serial. That probe is gone, not merely
+    guarded, because the machine it would have found is exactly the one it
+    must never touch: opening the GRBL board's port resets it, which aborts
+    the plot and loses its position, and with no homing switches that needs a
+    human to re-park the carriage. `/api/status` polls every few seconds, so
+    the probe would have fired continuously against an idle board.
 
-    Only a board that has never been named, and so has no serial number, still
-    gets asked over serial, and only when nothing else holds it.
+    A machine that is configured but unplugged is still listed, with
+    attached False, because "your machine is not plugged in" is a better
+    answer than silently not offering it.
     """
-    import serial
-    import serial.tools.list_ports as lp
-
-    CR = chr(13).encode()
+    reg = machines.load()
     out = []
-    for p in sorted(lp.comports(), key=lambda x: x.device):
-        if (p.vid, p.pid) != EBB_VID_PID:
-            continue
-        busy = device_busy(p.device)
-        nickname = (p.serial_number or "").strip()
-        if not nickname and not busy:
-            try:
-                with hold(p.device) as got:
-                    if got:
-                        with serial.Serial(p.device, 9600, timeout=1.5) as sp:
-                            time.sleep(0.15)
-                            sp.write(CR)          # end any half command first
-                            time.sleep(0.2)
-                            sp.reset_input_buffer()
-                            sp.write(b"QT" + CR)
-                            time.sleep(0.3)
-                            reply = sp.read(100).decode(errors="replace").strip()
-                            first = reply.splitlines()[0].strip() if reply else ""
-                            if first not in ("", "OK") and "Err" not in first:
-                                nickname = first
-                    else:
-                        busy = True
-            except Exception:
-                pass
-        out.append({"device": p.device, "nickname": nickname,
-                    "busy": busy, "label": nickname or p.device})
+    for name, e in sorted(reg.items()):
+        device = e["device"]
+        out.append({
+            "device": device,
+            "nickname": name,
+            "label": name,
+            "busy": device_busy(device) if device else False,
+            "attached": bool(device),
+            "driver": e["driver"],
+            "travel": e["travel"],
+            "assumed": bool(e.get("assumed")),
+        })
     return out
 
 
 def resolve(port):
-    """Turn a nickname or device path into a known board, or None.
+    """Turn a machine name or device path into a known machine, or None.
 
-    Asks the running jobs first, so a board that is mid-plot can still be
-    found by name without anything opening its port.
+    Safe to call from a request thread at any time, including mid-plot, since
+    nothing here opens a port. Running jobs are consulted as a fallback so a
+    machine unplugged mid-plot can still be found by name in order to be
+    stopped.
     """
     if not port:
         return None        # never guess a board: that is what bit us today
-    for j in jobs.values():
-        if port in (j.label, j.device):
-            return {"device": j.device, "label": j.label,
-                    "nickname": j.label, "busy": j.busy}
     for b in list_boards():
         if port in (b["nickname"], b["device"]):
             return b
+    for j in snapshot_jobs():
+        if port in (j.label, j.device):
+            return {"device": j.device, "label": j.label, "nickname": j.label,
+                    "busy": j.busy, "attached": True, "driver": j.driver,
+                    "travel": j.travel, "assumed": False}
     return None
 
 
@@ -269,21 +284,41 @@ def preflight(port):
                    ok_detail=port):
             return False, out, None
     else:
-        if not req("only one plotter, so auto-select is safe", len(boards) == 1,
-                   f"{len(boards)} boards attached, pick one by name"):
+        attached = [b for b in boards if b["attached"]]
+        if not req("only one plotter, so auto-select is safe", len(attached) == 1,
+                   f"{len(attached)} machines attached, pick one by name"):
             return False, out, None
-        chosen = boards[0]
+        chosen = attached[0]
+
+    if not req("the machine is plugged in", chosen["attached"],
+               f"{chosen['label']} is in machines.json but its device is not "
+               f"there. Check the cable, and that it is in the USB socket its "
+               f"by_path names."):
+        return False, out, chosen
+
+    # Busy FIRST, before anything opens anything. This check used to live in
+    # the exception handler below, which meant board_health had already opened
+    # the port by the time it ran. On an EiBotBoard that kills the running
+    # plot; on the GRBL board opening the port is a reset, so it also loses the
+    # position, and with no homing that needs a human to re-park the carriage.
+    if not req("the machine is free", not device_busy(chosen["device"]),
+               f"{chosen['label']} is already drawing"):
+        return False, out, chosen
+
+    if chosen["driver"] != "axidraw":
+        # Deliberately no health check for GRBL. Every way of asking this board
+        # a question opens its port, and opening its port resets it. The
+        # worker's own connect is the first thing allowed to touch it, and any
+        # problem surfaces there where it can be reported against a real job.
+        out.append({"label": "machine is ready", "ok": True,
+                    "detail": f"{chosen['label']} ({chosen['driver']}), not "
+                              f"probed: opening this board's port resets it"})
+        return True, out, chosen
 
     try:
         h = board_health(chosen["device"])
     except Exception as exc:
-        # A board that another plot is using cannot be asked anything, and
-        # saying so plainly beats the lock's generic complaint.
-        if device_busy(chosen["device"]):
-            req("the board is free", False,
-                f"{chosen['label']} is already drawing")
-        else:
-            req("the board answers", False, f"{type(exc).__name__}: {exc}")
+        req("the board answers", False, f"{type(exc).__name__}: {exc}")
         return False, out, chosen
 
     ok = req("the board answers", True, h["firmware"])
@@ -296,6 +331,67 @@ def preflight(port):
     out.append({"label": "board status byte", "ok": True,
                 "detail": f"QG {h['qg']}, recorded not judged"})
     return bool(ok), out, chosen
+
+
+def grbl_worker(job, paths, entry):
+    """Drive a GRBL machine for one plot, start to finish, on one connection.
+
+    One connection is not a style choice. GRBL has no homing here, so its
+    position means nothing after a reset, and opening the serial port IS a
+    reset. Reconnecting part way through would silently move the origin to
+    wherever the carriage happened to be. The operator has already confirmed
+    the carriage is parked, which is what makes the zeroing below legitimate.
+    """
+    from plotter import Grbl, merge_paths
+
+    g = Grbl(port=job.device,
+             travel=tuple(entry["travel"]),
+             feed=int(entry.get("feed", 5000)),
+             pen_up_z=float(entry.get("pen_up_z", 1.0)),
+             pen_down_z=float(entry.get("pen_down_z", 0.0)),
+             pen_dwell_s=float(entry.get("pen_dwell_s", 0.25)),
+             flip_y=bool(entry.get("flip_y", True)))
+
+    lock = hold(job.device, wait=3)
+    if not lock.__enter__():
+        job.state = "error"
+        job.message = f"{job.label} is in use by something else"
+        return
+    try:
+        g.connect()
+        g.set_origin_here()      # legitimate: the operator confirmed the park
+        drawn = merge_paths(paths)
+        job.total = sum(len(p) - 1 for p in drawn)
+        job.message = "drawing"
+        done = 0
+        for i, path in enumerate(drawn):
+            if job.stop.is_set():
+                break
+            job.message = f"drawing path {i + 1} of {len(drawn)}"
+            if not g.draw_path(path, job.stop):
+                break
+            done += len(path) - 1
+            job.done = done
+        g.disconnect()
+        if job.stop.is_set():
+            job.state = "stopped"
+            job.message = f"stopped by request after {job.done} of {job.total} segments"
+        else:
+            job.state = "done"
+            job.message = (f"finished, {job.total} segments in "
+                           f"{time.time() - job.started:.0f}s")
+    except Exception as exc:
+        job.state, job.message = "error", f"{type(exc).__name__}: {exc}"
+        # Leave the machine safe, not mid-stroke with moves still queued. The
+        # pen is the urgent part: a stopped carriage with the nib down bleeds
+        # a blot through the paper.
+        try:
+            g._halt()
+            g.disconnect()
+        except Exception:
+            pass
+    finally:
+        lock.__exit__(None, None, None)
 
 
 def plot_worker(job, paths, model, speed, pen_up, pen_down, preview, accel=75):
@@ -470,6 +566,13 @@ def info():
         "version": VERSION,
         "page": page_stamp(),
         "models": {k: {"x": v[0], "y": v[1], "name": v[2]} for k, v in MODELS.items()},
+        # The machines that actually exist here, which is what the pages should
+        # offer. `models` stays for the moment so an older cached page keeps
+        # working through the deploy rather than breaking halfway.
+        "machines": {b["label"]: {"x": b["travel"][0], "y": b["travel"][1],
+                                  "driver": b["driver"], "attached": b["attached"],
+                                  "assumed": b["assumed"]}
+                     for b in list_boards()},
         "host": os.uname().nodename,
     })
 
@@ -480,15 +583,27 @@ def boards():
 
 
 def _pick_job(port):
-    """The job a request means: the named board, or the only live one."""
+    """The job a request means: the named machine, or the only live one.
+
+    Falls back to matching the job's own label when the registry cannot
+    resolve the name. A stop that cannot find its machine returns "not
+    drawing" while the machine carries on plotting, and a stop button that
+    silently does nothing is the worst failure available here.
+    """
+    js = snapshot_jobs()
     if port:
         b = resolve(port)
-        return jobs.get(b["device"]) if b else None
-    running = [j for j in jobs.values() if j.busy]
+        if b and b["device"] in jobs:
+            return jobs[b["device"]]
+        for j in js:
+            if port in (j.label, j.device):
+                return j
+        return None
+    running = [j for j in js if j.busy]
     if len(running) == 1:
         return running[0]
-    if len(jobs) == 1:
-        return next(iter(jobs.values()))
+    if len(js) == 1:
+        return js[0]
     return None
 
 
@@ -508,7 +623,7 @@ def status():
         {"board": o.label, "state": o.state,
          "pct": round(100 * o.done / o.total) if o.total else 0,
          "remaining_s": o.snapshot()["remaining_s"]}
-        for o in jobs.values() if o is not j and o.state != "idle"]
+        for o in snapshot_jobs() if o is not j and o.state != "idle"]
     return jsonify(snap)
 
 
@@ -518,7 +633,7 @@ def stop():
     port = body.get("port") or request.args.get("port") or None
     j = _pick_job(port)
     if not j or not j.busy:
-        running = [o.label for o in jobs.values() if o.busy]
+        running = [o.label for o in snapshot_jobs() if o.busy]
         why = (f"{port} is not drawing" if port else
                "more than one board is drawing, say which" if len(running) > 1
                else "nothing is running")
@@ -566,11 +681,11 @@ def check():
     body = request.get_json(force=True)
     paths = read_paths(body)
     points = [q for p in paths for q in p]
-    model = int(body.get("model", 2))
-    ok, claims = check_claims(points, model)
-    # Ask the hardware too. Preflight leaves a board that is mid-plot alone and
-    # says it is busy, so checking one machine never disturbs the other.
-    hw_ok, hw, _ = preflight(body.get("port") or None)
+    # Ask the hardware too. Preflight leaves a machine that is mid-plot alone
+    # and says it is busy, so checking one never disturbs the other.
+    hw_ok, hw, chosen = preflight(body.get("port") or None)
+    travel = chosen["travel"] if chosen else None
+    ok, claims = check_claims(points, travel, chosen["label"] if chosen else "")
     claims = claims + hw
     ok = ok and hw_ok
     speed = max(1, int(body.get("speed", 25)))
@@ -592,14 +707,30 @@ def plot():
     body = request.get_json(force=True)
     paths = read_paths(body)
     points = [q for p in paths for q in p]
-    model = int(body.get("model", 2))
-
     # Claims run outside the jobs lock: preflight talks to hardware and takes
     # a second or two, and one board's check must not hold up the other.
-    ok, claims = check_claims(points, model)
     hw_ok, hw, chosen = preflight(body.get("port") or None)
+    travel = chosen["travel"] if chosen else None
+    ok, claims = check_claims(points, travel, chosen["label"] if chosen else "")
     claims = claims + hw
     ok = ok and hw_ok
+
+    # No machine here has home switches. Every one of them believes the
+    # carriage is at (0, 0) wherever it happens to be sitting, so a plot sent
+    # after a stop, an error or a restart is measured from a corner that is
+    # not the corner. There is nothing in software that can check this, which
+    # is exactly why it has to be asserted by a person each time.
+    parked = bool(body.get("origin_confirmed"))
+    ok = ok and parked
+    claims.append({
+        "label": "the carriage is parked in the home corner",
+        "ok": parked,
+        "detail": "" if parked else
+                  "confirm the carriage is parked before plotting. No machine "
+                  "here has home switches, so it will take wherever it is "
+                  "standing as (0, 0) and every coordinate after that is wrong.",
+    })
+
     if not ok:
         failed = [c for c in claims if not c["ok"]]
         return jsonify({"ok": False, "claims": claims,
@@ -608,23 +739,39 @@ def plot():
                                   else c["label"] for c in failed)}), 400
 
     with jobs_lock:
-        dev = chosen["device"]
+        # Re-resolve inside the lock. `chosen` was read before preflight, which
+        # takes a second or two talking to hardware, and in that window the
+        # machine could have been unplugged, replugged onto a different device
+        # node, or claimed by another request.
+        entry = machines.load().get(chosen["label"])
+        dev = entry["device"] if entry else None
+        if not dev:
+            return jsonify({"ok": False,
+                            "message": f"{chosen['label']} went away between "
+                                       f"the check and the plot"}), 409
         job = jobs.get(dev)
         if job and job.busy:
             return jsonify({"ok": False,
                             "message": f"{job.label} is already drawing"}), 409
-        job = Job(dev, chosen["label"])
+        job = Job(dev, chosen["label"], entry["driver"], entry["travel"])
         jobs[dev] = job
         job.state = "running"
         job.message = "starting"
         job.total = sum(len(p) - 1 for p in paths)
         job.started = time.time()
-        job.thread = threading.Thread(
-            target=plot_worker,
-            args=(job, paths, model, int(body.get("speed", 25)),
-                  int(body.get("pen_up", 60)), int(body.get("pen_down", 0)),
-                  bool(body.get("preview", True)), int(body.get("accel", 75))),
-            daemon=True)
+        if entry["driver"] == "grbl":
+            job.thread = threading.Thread(
+                target=grbl_worker, args=(job, paths, entry), daemon=True)
+        else:
+            job.thread = threading.Thread(
+                target=plot_worker,
+                args=(job, paths, int(entry.get("model", 2)),
+                      int(body.get("speed", entry.get("speed", 25))),
+                      int(body.get("pen_up", entry.get("pen_up", 60))),
+                      int(body.get("pen_down", entry.get("pen_down", 0))),
+                      bool(body.get("preview", True)),
+                      int(body.get("accel", entry.get("accel", 75)))),
+                daemon=True)
         job.thread.start()
     return jsonify({"ok": True, "message": f"plotting on {job.label}",
                     "board": job.label, "paths": len(paths),
