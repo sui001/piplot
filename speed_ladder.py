@@ -71,8 +71,14 @@ def label(text, x, y, h):
     return out
 
 
-def motif(cx, cy, size):
-    """The test pattern, centred on (cx, cy) and fitting in a size box."""
+def motif(cx, cy, size, detail=1.0):
+    """The test pattern, centred on (cx, cy) and fitting in a size box.
+
+    detail thins the rosette and the hatch. It exists because the GRBL machine
+    is slow enough that the full pattern costs four and a half minutes a cell,
+    and a five cell ladder nobody waits for teaches nothing. Keep it at 1.0 for
+    anything being compared against an AxiDraw sheet.
+    """
     r = size / 2
     paths = []
 
@@ -82,16 +88,17 @@ def motif(cx, cy, size):
                   (cx - s, cy + s), (cx - s, cy - s)])
 
     # Rosette: smooth curve with cusps, where the gantry ringing shows.
+    steps = max(120, int(720 * detail))
     rose = []
-    for i in range(721):
-        t = i / 720 * 2 * math.pi
+    for i in range(steps + 1):
+        t = i / steps * 2 * math.pi
         rr = r * 0.72 * abs(math.cos(2.5 * t))
         rose.append((cx + rr * math.cos(t), cy + rr * math.sin(t)))
     paths.append(rose)
 
     # Hatch: closely spaced lines. Ink starvation shows as lines going thin,
     # and each line is a ruler for the one beside it.
-    n, span = 22, r * 0.8
+    n, span = max(6, int(22 * detail)), r * 0.8
     for i in range(n):
         y = cy - span / 2 + i * span / (n - 1)
         row = [(cx - r * 0.45, y), (cx + r * 0.45, y)]
@@ -142,10 +149,33 @@ def run_grbl(args, cells, travel, varying) -> int:
     print("the carriage's current position becomes 0,0, so it must be parked "
           "at the bottom left")
     results = []
+    original_accel = None
     try:
         g.connect()
+        if varying == "accel":
+            # Remember what the board had, because a ladder that is stopped
+            # partway would otherwise leave the machine running at whatever the
+            # last cell wrote, and nothing would say so. $120 is not a setting
+            # anyone checks before the next plot.
+            for ln in g._send("$$", 1.8).splitlines():
+                if ln.strip().startswith("$120="):
+                    original_accel = ln.strip().split("=", 1)[1]
+            print(f"board acceleration is {original_accel}, will be put back at the end")
         for shown, sp, ac, paths in cells:
             g.feed = sp
+            if varying == "accel":
+                # Acceleration is not a per-job option here the way it is on an
+                # AxiDraw. It lives in the board's EEPROM, so laddering it means
+                # writing $120/$121 between cells, which GRBL only accepts while
+                # idle. draw_path leaves it idle, so this is safe here and
+                # nowhere else in the loop.
+                for axis in (120, 121):
+                    g._send(f"${axis}={ac}", 0.25)
+                # Too much acceleration makes a CoreXY skip a belt tooth, and a
+                # skip does not announce itself: the board keeps counting steps
+                # it never took. The sheet is the detector. A cell drawn after a
+                # skip sits visibly offset from its neighbours, so read the
+                # ladder for displacement as much as for line quality.
             mm = sum(math.dist(path[i - 1], path[i])
                      for path in paths for i in range(1, len(path)))
             print(f"  {shown:5}  ({sp} mm/min)  {mm:.0f} mm ...", end="", flush=True)
@@ -179,7 +209,15 @@ def main() -> int:
                    help="grbl only: the envelope, since GRBL does not know its own")
     p.add_argument("--paper", type=mm_pair, default=(420.0, 297.0))
     p.add_argument("--margin", type=float, default=18.0)
+    p.add_argument("--detail", type=float, default=1.0,
+                   help="thin the rosette and hatch, 1.0 is the full pattern")
     p.add_argument("--cols", type=int, default=3)
+    p.add_argument("--skip", type=int, default=0,
+                   help="leave this many cells empty first, to resume onto a "
+                        "sheet that already has some drawn")
+    p.add_argument("--slots", type=int, default=None,
+                   help="total cells the grid was laid out for; give the "
+                        "ORIGINAL count when resuming with --skip")
     p.add_argument("--port", default=None, help="board nickname or device path")
     p.add_argument("--pen-down", type=int, default=0)
     p.add_argument("--pen-up", type=int, default=60)
@@ -209,8 +247,14 @@ def main() -> int:
     else:
         tx, ty, name = MODELS[args.model]
     pw, ph = args.paper
-    cols = min(args.cols, len(speeds))
-    rows = math.ceil(len(speeds) / cols)
+    # slots and skip exist to resume a ladder onto a sheet that already has
+    # cells on it. The grid must stay exactly as the first run laid it out, so
+    # slots is the ORIGINAL cell count, not how many are being drawn now.
+    # Getting this wrong does not fail, it just draws a different sized cell
+    # that does not line up with its neighbours, and the sheet is wasted.
+    slots = args.slots or (len(speeds) + args.skip)
+    cols = min(args.cols, slots)
+    rows = math.ceil(slots / cols)
     cw = (pw - 2 * args.margin) / cols
     ch = (ph - 2 * args.margin) / rows
     lab_h = min(7.0, ch * 0.12)
@@ -234,9 +278,10 @@ def main() -> int:
 
     cells = []
     for i, (shown, sp, ac) in enumerate(cells_spec):
-        cx = args.margin + (i % cols) * cw + cw / 2
-        cy = args.margin + (i // cols) * ch + ch / 2 + lab_h * 0.6
-        paths = motif(cx, cy, size)
+        slot = i + args.skip
+        cx = args.margin + (slot % cols) * cw + cw / 2
+        cy = args.margin + (slot // cols) * ch + ch / 2 + lab_h * 0.6
+        paths = motif(cx, cy, size, args.detail)
         paths += label(f"{shown}", cx - size * 0.2,
                        cy - size / 2 - lab_h * 1.5, lab_h)
         cells.append((shown, sp, ac, paths))
