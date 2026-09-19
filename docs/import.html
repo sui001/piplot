@@ -185,6 +185,14 @@
       <input type="checkbox" id="rot90" style="justify-self:start"><output></output></div>
     <div class="row"><label for="flipy">flip y</label>
       <input type="checkbox" id="flipy" style="justify-self:start"><output></output></div>
+    <div class="row"><label for="nib">nib width</label>
+      <input type="range" id="nib" min="0.05" max="2" step="0.01" value="0.3"><output id="nibV"></output></div>
+    <div class="row"><label for="simp">simplify</label>
+      <input type="range" id="simp" min="0" max="1" step="0.01" value="0.25"><output id="simpV"></output></div>
+    <div class="note">The preview draws at the nib width, so small features that
+      will fill in solid show as blobs here too. Simplify drops points closer to
+      the line than that fraction of a nib width: you cannot see error smaller
+      than the line is wide, and every point kept is another stop for the motors.</div>
     <div class="row"><label for="speed">speed</label>
       <input type="range" id="speed" min="5" max="100" step="1" value="25"><output id="speedV"></output></div>
     <div class="row"><label for="penDown">pen down</label>
@@ -193,6 +201,8 @@
       <input type="range" id="penUp" min="0" max="100" step="1" value="60"><output id="penUpV"></output></div>
     <div class="row"><label for="prev">pre-lap</label>
       <input type="checkbox" id="prev" checked style="justify-self:start"><output></output></div>
+    <div class="row"><label for="sortp">sort paths</label>
+      <input type="checkbox" id="sortp" checked style="justify-self:start"><output></output></div>
     <div class="row"><label for="join">join paths</label>
       <input type="checkbox" id="join" style="justify-self:start"><output></output></div>
     <div class="note">Join paths concatenates everything into the single
@@ -211,6 +221,7 @@
       <span>path <b id="sLen">0</b> mm</span>
       <span>est <b id="sEst">0</b></span>
       <span>size <b id="sSize">0</b> mm</span>
+      <span>kept <b id="sKept">all</b></span>
     </div>
     <div class="poles" id="travel"></div>
     <div class="bar">
@@ -909,9 +920,120 @@ function syncPanels() {
   $("file").accept = k === "img" ? "image/*" : k === "json" ? ".json,application/json" : ".svg,image/svg+xml";
 }
 
+/* ---------------------------------------------------------------- simplify */
+
+function rdp(pts, eps) {
+  // Ramer-Douglas-Peucker, iterative so a long path cannot blow the stack.
+  // eps is in paper millimetres. A closed ring has a zero-length chord, which
+  // falls back to distance from the end point.
+  if (pts.length < 3 || eps <= 0) return pts;
+  const keep = new Uint8Array(pts.length);
+  keep[0] = keep[pts.length - 1] = 1;
+  const stack = [[0, pts.length - 1]];
+  while (stack.length) {
+    const [a, b] = stack.pop();
+    if (b - a < 2) continue;
+    const [ax, ay] = pts[a], [bx, by] = pts[b];
+    const dx = bx - ax, dy = by - ay, len = Math.hypot(dx, dy);
+    let worst = -1, wi = -1;
+    for (let i = a + 1; i < b; i++) {
+      const [px, py] = pts[i];
+      const d = len < 1e-9 ? Math.hypot(px - ax, py - ay)
+                           : Math.abs(dy * (px - ax) - dx * (py - ay)) / len;
+      if (d > worst) { worst = d; wi = i; }
+    }
+    if (worst > eps) { keep[wi] = 1; stack.push([a, wi], [wi, b]); }
+  }
+  const out = [];
+  for (let i = 0; i < pts.length; i++) if (keep[i]) out.push(pts[i]);
+  return out;
+}
+
+/* -------------------------------------------------------------- path order */
+
+function travelOf(paths) {
+  // Pen-up distance between strokes, measured the same way the stats line
+  // measures it, so "was" and "now" are the same kind of number.
+  let d = 0;
+  for (let i = 1; i < paths.length; i++) {
+    const a = paths[i - 1][paths[i - 1].length - 1], b = paths[i][0];
+    d += Math.hypot(b[0] - a[0], b[1] - a[1]);
+  }
+  return d;
+}
+
+function sortPaths(paths) {
+  // Greedy nearest neighbour from the home corner: always go to whichever
+  // unused stroke has an end closest to where the pen is, and draw it from
+  // that end, reversing it if the near end is its last point. Not optimal,
+  // but it usually removes most of the pen-up travel, and the file's own order
+  // is often whatever the program that wrote it happened to use.
+  //
+  // Stroke ends go in a grid of cells about one stroke's worth of area each,
+  // and the search walks outwards ring by ring. Checking every stroke against
+  // every other is 315 million comparisons for a 17,761 stroke map, and this
+  // runs on every slider move.
+  const n = paths.length;
+  if (n < 3) return paths;
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  for (const p of paths) for (const q of [p[0], p[p.length - 1]]) {
+    if (q[0] < x0) x0 = q[0];
+    if (q[0] > x1) x1 = q[0];
+    if (q[1] < y0) y0 = q[1];
+    if (q[1] > y1) y1 = q[1];
+  }
+  const cell = Math.max(Math.sqrt(((x1 - x0) * (y1 - y0) || 1) / n), 0.5);
+  const ni = Math.floor((x1 - x0) / cell) + 1, nj = Math.floor((y1 - y0) / cell) + 1;
+  const grid = new Map();
+  const key = (i, j) => i * 100003 + j;
+  const cellOf = q => [Math.min(ni - 1, Math.max(0, Math.floor((q[0] - x0) / cell))),
+                       Math.min(nj - 1, Math.max(0, Math.floor((q[1] - y0) / cell)))];
+  paths.forEach((p, k) => {
+    for (const e of [0, 1]) {
+      const [i, j] = cellOf(e ? p[p.length - 1] : p[0]);
+      const kk = key(i, j);
+      if (!grid.has(kk)) grid.set(kk, []);
+      grid.get(kk).push(k * 2 + e);
+    }
+  });
+
+  const used = new Uint8Array(n);
+  const out = [];
+  let at = [0, 0];
+  for (let step = 0; step < n; step++) {
+    const [ci, cj] = cellOf(at);
+    let best = -1, bestD = Infinity;
+    for (let r = 0; r <= Math.max(ni, nj); r++) {
+      for (let i = ci - r; i <= ci + r; i++) {
+        for (let j = cj - r; j <= cj + r; j++) {
+          if (Math.max(Math.abs(i - ci), Math.abs(j - cj)) !== r) continue;
+          const bucket = grid.get(key(i, j));
+          if (!bucket) continue;
+          for (let b = bucket.length - 1; b >= 0; b--) {
+            const id = bucket[b], k = id >> 1;
+            if (used[k]) { bucket[b] = bucket[bucket.length - 1]; bucket.pop(); continue; }
+            const p = paths[k], q = (id & 1) ? p[p.length - 1] : p[0];
+            const d = Math.hypot(q[0] - at[0], q[1] - at[1]);
+            if (d < bestD) { bestD = d; best = id; }
+          }
+        }
+      }
+      // Anything in the next ring out is at least r cells away, so once the
+      // best found is closer than that, nothing further can beat it.
+      if (best >= 0 && bestD <= r * cell) break;
+    }
+    const k = best >> 1;
+    used[k] = 1;
+    const p = (best & 1) ? paths[k].slice().reverse() : paths[k];
+    out.push(p);
+    at = p[p.length - 1];
+  }
+  return out;
+}
+
 function render() {
   for (const id of ["tol","minlen","spacing","amount","wave","angle","gamma",
-                    "thresh","cover","margin","speed","penDown","penUp"]) {
+                    "thresh","cover","margin","speed","penDown","penUp","nib","simp"]) {
     const o = $(id + "V"); if (o) o.textContent = $(id).value;
   }
   let paths;
@@ -934,6 +1056,27 @@ function render() {
     if (keep.length) paths = keep;
   }
   const fit = fitToPaper(paths);
+  const nib = +$("nib").value, eps = nib * +$("simp").value;
+  fit.nib = nib;
+  fit.ptsBefore = fit.paths.reduce((n, p) => n + p.length, 0);
+  if (eps > 0) fit.paths = fit.paths.map(p => rdp(p, eps)).filter(p => p.length >= 2);
+  // A stroke that fits inside two nib widths prints as a dot or a blob, not a
+  // shape. Worth knowing before a map's trees come out as a scatter of ink.
+  fit.tiny = fit.paths.filter(p => {
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    for (const q of p) {
+      if (q[0] < x0) x0 = q[0];
+      if (q[0] > x1) x1 = q[0];
+      if (q[1] < y0) y0 = q[1];
+      if (q[1] > y1) y1 = q[1];
+    }
+    return Math.max(x1 - x0, y1 - y0) < 2 * nib;
+  }).length;
+  fit.travelBefore = null;
+  if ($("sortp").checked && fit.paths.length > 2) {
+    fit.travelBefore = travelOf(fit.paths);
+    fit.paths = sortPaths(fit.paths);
+  }
   CUR = fit;
   draw(fit);
   stats(fit);
@@ -953,8 +1096,11 @@ function draw(fit) {
   g.strokeStyle = "#c9c6bd"; g.lineWidth = 1;
   g.strokeRect(ox, oy, fit.pw*sc, fit.ph*sc);
 
-  g.strokeStyle = "rgba(16,16,20,0.72)";
-  g.lineWidth = 0.32; g.lineJoin = "round";
+  // At the real nib width, so the preview shows what fills in. A hairline
+  // always looks good, which is exactly what it hides.
+  g.strokeStyle = "rgba(16,16,20,0.78)";
+  g.lineWidth = Math.max(0.35, (fit.nib || 0.3) * sc);
+  g.lineJoin = g.lineCap = "round";
   g.beginPath();
   for (const p of fit.paths)
     p.forEach((q, i) => { const X = ox+q[0]*sc, Y = oy+q[1]*sc;
@@ -1007,8 +1153,15 @@ function stats(fit) {
   $("sEst").textContent = est > 3600 ? (est/3600).toFixed(1)+" h"
                         : est > 90 ? Math.round(est/60)+" min" : Math.round(est)+" s";
   $("sSize").textContent = Math.round(fit.w) + " x " + Math.round(fit.h);
+  $("sKept").textContent = fit.ptsBefore === pts ? "all" : `${pts} of ${fit.ptsBefore}`;
+  const was = fit.travelBefore;
   $("travel").innerHTML = fit.paths.length > 1
-    ? `travel between paths <b>${Math.round(travel)}</b> mm` : "";
+    ? `travel between paths <b>${Math.round(travel)}</b> mm` +
+      (was ? `, was <b>${Math.round(was)}</b> mm before sorting` : "")
+    : "";
+  if (fit.tiny)
+    $("travel").innerHTML += `<br><b style="color:#A32D2D">${fit.tiny}</b> strokes are ` +
+      `smaller than two nib widths and will print as blobs`;
 
   $("bSvg").disabled = false;
   const many = fit.paths.length > 1 && !$("join").checked;
@@ -1029,7 +1182,7 @@ const flatPoints = () => CUR.paths.flat();
 const payload = () => ({
   ...($("join").checked || CUR.paths.length < 2
       ? { points: flatPoints() } : { paths: CUR.paths }),
-  port: $("board").value, model: +$("model").value,
+  port: $("board").value, nib: CUR.nib, model: +$("model").value,
   speed: +$("speed").value, pen_up: +$("penUp").value,
   pen_down: +$("penDown").value, preview: $("prev").checked });
 
@@ -1142,7 +1295,7 @@ function downloadSvg() {
   // where the breaks are even though the plot endpoint cannot use them.
   const d = f.paths.map(p =>
     "M" + p.map(q => `${q[0].toFixed(2)},${q[1].toFixed(2)}`).join(" L")).join(" ");
-  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${f.pw}mm" height="${f.ph}mm" viewBox="0 0 ${f.pw} ${f.ph}"><path d="${d}" fill="none" stroke="black" stroke-width="0.25"/></svg>`;
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${f.pw}mm" height="${f.ph}mm" viewBox="0 0 ${f.pw} ${f.ph}"><path d="${d}" fill="none" stroke="black" stroke-width="${f.nib || 0.25}" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
   const url = URL.createObjectURL(new Blob([svg], { type: "image/svg+xml" }));
   const a = document.createElement("a");
   a.href = url;
@@ -1234,6 +1387,9 @@ async function fileChosen(e) {
   $("src").addEventListener("change", () => { syncPanels(); render(); });
   $("file").addEventListener("change", fileChosen);
   $("roads").addEventListener("change", render);
+  $("sortp").addEventListener("change", render);
+  $("nib").addEventListener("input", render);
+  $("simp").addEventListener("input", render);
   $("ptsize").addEventListener("input", render);
   ["tol","minlen","spacing","amount","wave","angle","gamma","thresh","cover",
    "invert","imode","pw","ph","margin","rot90","flipy","speed","penDown",
