@@ -28,7 +28,7 @@ from flask import Flask, jsonify, request, send_from_directory
 from pen_box import MODELS  # noqa: E402  the machine travel envelopes
 from portlock import hold  # noqa: E402  one thing at a time on a port
 
-VERSION = "0.6.2"
+VERSION = "0.6.3"
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DOCS = os.path.join(HERE, "docs")
@@ -392,7 +392,20 @@ def plot_worker(job, points, model, speed, pen_up, pen_down, preview, accel=75):
             if not job.stop.is_set():
                 job.done = job.total
 
+        if job.stop.is_set():
+            # After a pause the driver flags the plot as stopped and from then
+            # on every move returns silently, so the trip home below did
+            # nothing and a stopped machine was left hanging mid-sheet. That is
+            # worse than untidy: with no home switches, the next plot would take
+            # wherever it hung as its origin. Clear the flag, and hand the
+            # driver a fresh unset signal so it does not pause the trip home
+            # too. job.stop stays set, since it is what reports "stopped".
+            ad.plot_status.stopped = 0
+            ad.set_up_pause_receiver(threading.Event())
+            ad.clear_pause_request()
+
         job.message = "returning home"
+        ad.penup()
         ad.moveto(0, 0)
         ad.disconnect()
 
