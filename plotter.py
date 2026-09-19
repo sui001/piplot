@@ -10,6 +10,7 @@ run and looked at without the machine.
 
 from __future__ import annotations
 
+import time
 from typing import Optional, Tuple
 
 
@@ -176,3 +177,250 @@ class AxiDraw(Plotter):
             self.ad.moveto(0, 0)
         finally:
             self.ad.disconnect()
+
+
+class Grbl(Plotter):
+    """A GRBL 1.1 board over serial, with the pen servo on the Z axis.
+
+    Written against the homemade CoreXY machine on lyre, whose particulars are
+    worth stating because none of them are guessable:
+
+    - **The pen is on Z, not the spindle.** Its build reports `[OPT:C,15,128]`
+      with no `V`, so VARIABLE_SPINDLE is not compiled in, the spindle pin is a
+      plain digital output, and `M3 S100` and `M3 S1000` are the same
+      instruction. Two sessions went into sending spindle commands that the
+      board cheerfully answered `ok` to while nothing moved.
+    - **The servo is binary.** Every Z above zero gives the same lift, so
+      `pen_up_z` is chosen for speed, not height. Z is a real timed move at
+      `$112` mm/min, so Z1 costs about 0.12 s and Z15 costs 1.8 s. Across a
+      few thousand strokes that is the difference between a plot and an
+      afternoon.
+    - **There is no homing and there are no limits** (`$20=$21=$22=0`), and
+      `$130/$131` are left at 5000, so the firmware believes the machine is
+      five metres wide. Nothing but this class will stop a path driving the
+      carriage into a rail end, which is why `travel` is checked here and not
+      merely hoped for.
+    - **y runs up the page.** Origin is the bottom left corner with +Y away
+      from the operator, while piplot's paper frame is y down the page. So the
+      mapping is flipped here, once, rather than at every call site.
+    """
+
+    # $I reports the real figure as the third field of OPT. Undersizing it only
+    # costs throughput; oversizing it overruns the board and corrupts commands.
+    RX_BUFFER = 128
+
+    def __init__(self, port: str = "/dev/ttyUSB0", baud: int = 115200,
+                 travel: Tuple[float, float] = (420.0, 297.0),
+                 pen_up_z: float = 1.0, pen_down_z: float = 0.0,
+                 pen_dwell_s: float = 0.25, feed: int = 3000,
+                 travel_feed: int = 5000, flip_y: bool = True):
+        self.sp = None
+        self.port = port
+        self.baud = baud
+        self.travel = travel
+        self.pen_up_z = pen_up_z
+        self.pen_down_z = pen_down_z
+        self.pen_dwell_s = pen_dwell_s
+        self.feed = feed
+        self.travel_feed = travel_feed
+        self.flip_y = flip_y
+        self.down = False
+
+    # ---- coordinates -------------------------------------------------------
+
+    def _xy(self, x: float, y: float) -> Tuple[float, float]:
+        """Paper mm, y down, into machine mm, y up."""
+        return (x, self.travel[1] - y) if self.flip_y else (x, y)
+
+    def check(self, points) -> list:
+        """Reasons this path must not be sent, as plain sentences.
+
+        Empty means it is safe. The board has no soft limits of its own, so a
+        point past the end of a rail is not refused anywhere else: the carriage
+        simply drives there, the belt skips, and every coordinate after it is
+        wrong with nothing reported.
+        """
+        if not points:
+            return ["the path has no points"]
+        tx, ty = self.travel
+        bad = []
+        xs = [p[0] for p in points]
+        ys = [p[1] for p in points]
+        if min(xs) < 0 or max(xs) > tx:
+            bad.append(f"x spans {min(xs):.1f} to {max(xs):.1f} mm, "
+                       f"machine has 0 to {tx:.0f}")
+        if min(ys) < 0 or max(ys) > ty:
+            bad.append(f"y spans {min(ys):.1f} to {max(ys):.1f} mm, "
+                       f"machine has 0 to {ty:.0f}")
+        return bad
+
+    # ---- the wire ----------------------------------------------------------
+
+    def _send(self, line: str, wait: float = 0.05) -> str:
+        self.sp.write((line + "\n").encode())
+        time.sleep(wait)
+        return self.sp.read(self.sp.in_waiting or 1).decode(errors="replace").strip()
+
+    def _state(self) -> str:
+        """The one word inside GRBL's status report: Idle, Run, Hold, Alarm."""
+        self.sp.reset_input_buffer()
+        self.sp.write(b"?")
+        time.sleep(0.15)
+        reply = self.sp.read(self.sp.in_waiting or 1).decode(errors="replace")
+        if "<" not in reply:
+            return "?"
+        return reply.split("<", 1)[1].split("|", 1)[0].split(">", 1)[0].strip()
+
+    def _wait_idle(self, timeout: float = 600.0) -> bool:
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if self._state().startswith("Idle"):
+                return True
+            time.sleep(0.2)
+        return False
+
+    def connect(self) -> None:
+        import serial
+
+        self.sp = serial.Serial(self.port, self.baud, timeout=2)
+        time.sleep(2.0)          # the CH340 asserts DTR, which resets the board
+        self.sp.reset_input_buffer()
+        self._send("", 0.3)      # shake off any half command left by a replug
+
+        self._send("G21", 0.2)   # millimetres
+        self._send("G90", 0.2)   # absolute
+        self._send("G94", 0.2)   # feed is units per minute
+
+        # There is no homing, so wherever the carriage is parked becomes the
+        # origin. G10 L20 rather than G92 deliberately: G92 offsets are wiped by
+        # the soft reset that stopping needs, G10 L20 writes the work offset to
+        # EEPROM and survives it. Park the carriage at the bottom left corner
+        # before connecting, or every coordinate after this is measured from
+        # the wrong place.
+        self._send("G10 L20 P0 X0 Y0 Z0", 0.3)
+
+        self.penup()
+
+    # ---- the pen -----------------------------------------------------------
+
+    def _pen(self, z: float) -> None:
+        # The dwell is not superstition. GRBL's move can complete before the
+        # servo has physically arrived, and the next move then starts with the
+        # nib halfway down, which drags a tail into the start of the stroke.
+        self._send(f"G0 Z{z:g}", 0.05)
+        self._send(f"G4 P{self.pen_dwell_s:g}", 0.05)
+
+    def penup(self) -> None:
+        # No "already up" guard, unlike pendown. Lifting costs 0.12 s and a
+        # redundant lift is harmless, while believing the pen is up when it is
+        # not draws a line across the sheet on the next travel move.
+        self._pen(self.pen_up_z)
+        self.down = False
+
+    def pendown(self) -> None:
+        if self.down:
+            return
+        self._pen(self.pen_down_z)
+        self.down = True
+
+    def goto(self, x: float, y: float) -> None:
+        mx, my = self._xy(x, y)
+        if self.down:
+            self._send(f"G1 X{mx:.3f} Y{my:.3f} F{self.feed}", 0.01)
+        else:
+            self._send(f"G0 X{mx:.3f} Y{my:.3f}", 0.01)
+
+    # ---- streaming ---------------------------------------------------------
+
+    def _stream(self, lines, stop_event=None) -> bool:
+        """Character counting, because waiting for `ok` per line would stutter.
+
+        Sending a line and waiting for its acknowledgement leaves the planner
+        empty between every move, so the machine decelerates to a stop at each
+        one. That is the same jerkiness `draw_path` exists to avoid on the
+        AxiDraw. Instead, keep as many bytes in flight as the board's receive
+        buffer will hold and let its fifteen block planner carry speed through
+        the corners.
+
+        Returns False if it was stopped part way.
+        """
+        pending: list[int] = []
+        i = 0
+        while i < len(lines) or pending:
+            if stop_event is not None and stop_event.is_set():
+                return False
+            while i < len(lines):
+                n = len(lines[i]) + 1
+                # Always let one line through, or a line longer than the buffer
+                # would wedge the loop against a condition it can never meet.
+                if pending and sum(pending) + n >= self.RX_BUFFER:
+                    break
+                self.sp.write((lines[i] + "\n").encode())
+                pending.append(n)
+                i += 1
+            reply = self.sp.readline().decode(errors="replace").strip()
+            if not reply:
+                continue
+            if reply.startswith("error") or reply.startswith("ALARM"):
+                raise RuntimeError(f"grbl rejected a command: {reply}")
+            # Push messages and status reports are not acknowledgements, so
+            # only `ok` retires a line. Counting them would let the byte total
+            # drift low and eventually overrun the board.
+            if reply == "ok":
+                pending.pop(0)
+        return True
+
+    def draw_path(self, points, stop_event=None) -> bool:
+        bad = self.check(points)
+        if bad:
+            raise ValueError("refusing to move: " + "; ".join(bad))
+
+        first = self._xy(*points[0])
+        lines = [f"G0 Z{self.pen_up_z:g}",
+                 f"G0 X{first[0]:.3f} Y{first[1]:.3f}",
+                 f"G4 P{self.pen_dwell_s:g}",
+                 f"G0 Z{self.pen_down_z:g}",
+                 f"G4 P{self.pen_dwell_s:g}"]
+        for x, y in points[1:]:
+            mx, my = self._xy(x, y)
+            lines.append(f"G1 X{mx:.3f} Y{my:.3f} F{self.feed}")
+        lines.append(f"G0 Z{self.pen_up_z:g}")
+
+        finished = self._stream(lines, stop_event)
+        if not finished:
+            self._halt()
+        else:
+            self._wait_idle()
+        self.down = False
+        return finished
+
+    def _halt(self) -> None:
+        """Stop now, and still know where the carriage is afterwards.
+
+        A soft reset alone would flush the planner but lose position, and with
+        no homing switches the next plot would take wherever it stopped as its
+        origin. So hold first and let the machine come to rest, which keeps
+        position valid across the reset, then clear the queued moves.
+        """
+        self.sp.write(b"!")
+        deadline = time.time() + 10
+        while time.time() < deadline and not self._state().startswith("Hold"):
+            time.sleep(0.1)
+        self.sp.write(b"\x18")
+        time.sleep(2.0)
+        self.sp.reset_input_buffer()
+        self._send("G21", 0.2)
+        self._send("G90", 0.2)
+        self._send("G94", 0.2)
+        self._pen(self.pen_up_z)
+
+    def disconnect(self) -> None:
+        if self.sp is None:
+            return
+        try:
+            self._pen(self.pen_up_z)
+            self._send("G0 X0 Y0", 0.05)
+            self._wait_idle(timeout=120)
+        finally:
+            self.sp.close()
+            self.sp = None
