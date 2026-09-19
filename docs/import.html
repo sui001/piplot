@@ -671,7 +671,11 @@ function build() {
     const m = $("imode").value;
     return m === "spiral" ? genSpiral() : genHatch(m);
   }
-  const text = $("svgText").value.trim() || SVGTEXT;
+  // A loaded file wins over the text box. The box only holds the first few
+  // thousand characters as a preview, and reading it first parsed a file cut
+  // off mid-path, so every real svg over 4 kB was rejected as invalid. Typing
+  // in the box clears SVGTEXT, which is what hands control back to the box.
+  const text = SVGTEXT || $("svgText").value.trim();
   if (!text) return [];
   // Two passes: the tolerance is in finished millimetres, which is only known
   // once the fit scale is, and the fit scale needs a flattened path to measure.
@@ -962,7 +966,13 @@ async function fileChosen(e) {
       setStatus("done", `loaded ${f.name}, ${IMG.w} x ${IMG.h} working pixels`);
     } else {
       const text = await f.text();
-      if (kind === "svg") { SVGTEXT = text; $("svgText").value = text.slice(0, 4000); }
+      if (kind === "svg") {
+        SVGTEXT = text;
+        $("svgText").value = text.length > 4000
+          ? text.slice(0, 4000) + "\n\n<!-- preview of the first 4000 characters only. " +
+            "The whole file is being used. Typing here replaces it. -->"
+          : text;
+      }
       else $("jsonText").value = text;
       setStatus("done", `loaded ${f.name}, ${(f.size/1024).toFixed(1)} kB`);
     }
