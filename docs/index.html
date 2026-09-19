@@ -594,7 +594,11 @@ const SKEY = "piplot.settings.v2";
 
 function controls() {
   return [...document.querySelectorAll("main input[id], main select[id]")]
-    .filter(el => el.type !== "file" && !el.classList.contains("numbox"));
+    .filter(el => el.type !== "file" && !el.classList.contains("numbox")
+    // Never remember "parked". It asserts where a carriage is standing right
+    // now, so restoring it from last session would turn the one check that
+    // cannot be made in software into a tick that is already on.
+                  && el.id !== "parked");
 }
 
 function saveSettings() {
