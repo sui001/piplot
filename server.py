@@ -23,12 +23,12 @@ import hashlib
 import threading
 import time
 
-from flask import Flask, jsonify, request, send_from_directory
+from flask import Flask, abort, jsonify, request, send_from_directory
 
 from pen_box import MODELS  # noqa: E402  the machine travel envelopes
 from portlock import hold  # noqa: E402  one thing at a time on a port
 
-VERSION = "0.6.3"
+VERSION = "0.7.0"
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DOCS = os.path.join(HERE, "docs")
@@ -298,7 +298,7 @@ def preflight(port):
     return bool(ok), out, chosen
 
 
-def plot_worker(job, points, model, speed, pen_up, pen_down, preview, accel=75):
+def plot_worker(job, paths, model, speed, pen_up, pen_down, preview, accel=75):
     from pyaxidraw import axidraw
 
     # The board was resolved to a device before this started, so the lock is on
@@ -355,8 +355,8 @@ def plot_worker(job, points, model, speed, pen_up, pen_down, preview, accel=75):
             # A pen-up lap round the bounding box, so a misplaced sheet shows
             # itself before any ink lands.
             job.message = "pen-up preview lap"
-            xs = [p[0] for p in points]
-            ys = [p[1] for p in points]
+            xs = [q[0] for p in paths for q in p]
+            ys = [q[1] for p in paths for q in p]
             box = [(min(xs), min(ys)), (max(xs), min(ys)),
                    (max(xs), max(ys)), (min(xs), max(ys)), (min(xs), min(ys))]
             for x, y in box:
@@ -365,32 +365,36 @@ def plot_worker(job, points, model, speed, pen_up, pen_down, preview, accel=75):
                 ad.moveto(x, y)
 
         if not job.stop.is_set():
-            # One planned move for the whole path. Drawing it segment by
-            # segment with lineto plans each move on its own, so the machine
-            # accelerates from rest and stops again for every segment: a
-            # 57,000 segment path stops 57,000 times, which is the jerkiness.
+            # One planned move per path. Drawing segment by segment with lineto
+            # plans each move on its own, so the machine accelerates from rest
+            # and stops again for every segment, which is the jerkiness.
             #
-            # draw_path raises the pen when it returns, so it cannot be split
-            # into chunks to poll the stop flag without stamping a pen lift at
-            # every boundary. The driver takes the Event itself instead.
-            job.message = "drawing"
+            # draw_path travels pen-up to the start of its path, lowers, draws
+            # and raises again, so a list of paths is simply one call each:
+            # that is the pen lift between strokes a map or a hatch needs. The
+            # driver takes the stop Event itself, and the loop checks it too so
+            # a stop between paths does not start the next one.
             ad.set_up_pause_receiver(job.stop)
-            vertices = [[float(x), float(y)] for x, y in points]
-            # No per-segment callback exists, so progress is reported against
-            # the driver's own time estimate. It is an estimate, and says so.
-            # ad.time_estimate is only populated after a plot, so it is
-            # useless for driving progress during one. Use the same length
-            # over speed figure that /api/check already reports.
-            job.estimate_s = path_length(points) / (2.18 * max(1, speed))
-            prog = threading.Thread(target=_progress_by_time, args=(job,),
-                                    daemon=True)
-            prog.start()
-            ad.draw_path(vertices)
-            # Only a path that ran to the end is complete. draw_path also
-            # returns when stopped, and marking that as all segments done made
-            # a stop at 10 of 40 report "stopped after 40 of 40".
-            if not job.stop.is_set():
-                job.done = job.total
+            if len(paths) == 1:
+                # No per-segment callback exists, so a single long path reports
+                # progress against a length over speed estimate, and says so.
+                job.message = "drawing"
+                job.estimate_s = path_length(paths[0]) / (2.18 * max(1, speed))
+                threading.Thread(target=_progress_by_time, args=(job,),
+                                 daemon=True).start()
+            done = 0
+            for i, path in enumerate(paths):
+                if job.stop.is_set():
+                    break
+                if len(paths) > 1:
+                    job.message = f"drawing path {i + 1} of {len(paths)}"
+                ad.draw_path([[float(x), float(y)] for x, y in path])
+                # Only a path that ran to the end is complete. draw_path also
+                # returns when stopped, and counting that one as done made a
+                # stop at 10 of 40 report "stopped after 40 of 40".
+                if not job.stop.is_set():
+                    done += len(path) - 1
+                    job.done = done
 
         if job.stop.is_set():
             # After a pause the driver flags the plot as stopped and from then
@@ -425,9 +429,22 @@ def plot_worker(job, points, model, speed, pen_up, pen_down, preview, accel=75):
         lock.__exit__(None, None, None)
 
 
+PAGES = ("index", "import")
+
+
 @app.get("/")
 def index():
     return send_from_directory(DOCS, "index.html")
+
+
+@app.get("/<name>.html")
+def page(name):
+    # Only the pages that exist. The import page linked to import.html, which
+    # this server never served, so it was a 404 on the Pi and only ever
+    # worked on GitHub Pages or through a test harness.
+    if name not in PAGES:
+        abort(404)
+    return send_from_directory(DOCS, name + ".html")
 
 
 def page_stamp():
@@ -437,9 +454,12 @@ def page_stamp():
     deploy that only touched the page. This can, which is what lets the browser
     notice it is running yesterday's javascript against today's server.
     """
+    h = hashlib.md5()
     try:
-        with open(os.path.join(DOCS, "index.html"), "rb") as fh:
-            return hashlib.md5(fh.read()).hexdigest()[:8]
+        for name in PAGES:
+            with open(os.path.join(DOCS, name + ".html"), "rb") as fh:
+                h.update(fh.read())
+        return h.hexdigest()[:8]
     except OSError:
         return "unknown"
 
@@ -507,10 +527,45 @@ def stop():
     return jsonify({"ok": True, "message": f"stopping {j.label}"})
 
 
+# Rough servo time for one pen lift and lower. Guessed, not measured, and it
+# matters: at half a second a map of 17,761 separate strokes spends about two
+# and a half hours on lifts alone, which a length over speed estimate hides
+# completely and turned a plot that would take hours into "16 min".
+LIFT_S = 0.5
+
+
+def read_paths(body):
+    """A request's drawing as a list of paths, from either payload shape.
+
+    The curve studio sends one continuous line as "points". The import page
+    sends "paths", one per stroke, so the pen can lift between them.
+    """
+    if body.get("paths"):
+        paths = [[(float(q[0]), float(q[1])) for q in p]
+                 for p in body["paths"] if p and len(p) >= 2]
+    else:
+        pts = [(float(q[0]), float(q[1])) for q in (body.get("points") or [])]
+        paths = [pts] if pts else []
+    return paths
+
+
+def estimate(paths, speed):
+    """Seconds, counting ink, pen-up travel and the lifts between strokes."""
+    ink = sum(path_length(p) for p in paths)
+    travel, at = 0.0, (0.0, 0.0)
+    for p in paths:
+        travel += math.dist(at, p[0])
+        at = p[-1]
+    travel += math.dist(at, (0.0, 0.0))            # and home again
+    return (ink / (2.18 * max(1, speed)) + travel / (2.18 * 75)
+            + len(paths) * LIFT_S), ink, travel
+
+
 @app.post("/api/check")
 def check():
     body = request.get_json(force=True)
-    points = body.get("points") or []
+    paths = read_paths(body)
+    points = [q for p in paths for q in p]
     model = int(body.get("model", 2))
     ok, claims = check_claims(points, model)
     # Ask the hardware too. Preflight leaves a board that is mid-plot alone and
@@ -518,17 +573,16 @@ def check():
     hw_ok, hw, _ = preflight(body.get("port") or None)
     claims = claims + hw
     ok = ok and hw_ok
-    length = path_length(points) if len(points) >= 2 else 0.0
-    # Rough: AxiDraw full pen-down speed is about 218 mm/s, and the speed
-    # option is a percentage of it. Acceleration and pen lifts are ignored, so
-    # treat this as a lower bound rather than a promise.
     speed = max(1, int(body.get("speed", 25)))
-    est = length / (2.18 * speed)
+    est, ink, travel = estimate(paths, speed) if paths else (0, 0.0, 0.0)
     return jsonify({
         "ok": ok,
         "claims": claims,
-        "segments": max(0, len(points) - 1),
-        "length_mm": round(length, 1),
+        "paths": len(paths),
+        "segments": sum(len(p) - 1 for p in paths),
+        "length_mm": round(ink, 1),
+        "travel_mm": round(travel, 1),
+        # Still rough: acceleration is ignored and the lift time is a guess.
         "estimate_s": round(est),
     })
 
@@ -536,7 +590,8 @@ def check():
 @app.post("/api/plot")
 def plot():
     body = request.get_json(force=True)
-    points = [(float(p[0]), float(p[1])) for p in (body.get("points") or [])]
+    paths = read_paths(body)
+    points = [q for p in paths for q in p]
     model = int(body.get("model", 2))
 
     # Claims run outside the jobs lock: preflight talks to hardware and takes
@@ -562,17 +617,18 @@ def plot():
         jobs[dev] = job
         job.state = "running"
         job.message = "starting"
-        job.total = len(points) - 1
+        job.total = sum(len(p) - 1 for p in paths)
         job.started = time.time()
         job.thread = threading.Thread(
             target=plot_worker,
-            args=(job, points, model, int(body.get("speed", 25)),
+            args=(job, paths, model, int(body.get("speed", 25)),
                   int(body.get("pen_up", 60)), int(body.get("pen_down", 0)),
                   bool(body.get("preview", True)), int(body.get("accel", 75))),
             daemon=True)
         job.thread.start()
     return jsonify({"ok": True, "message": f"plotting on {job.label}",
-                    "board": job.label, "segments": job.total})
+                    "board": job.label, "paths": len(paths),
+                    "segments": job.total})
 
 
 def default_host() -> str:

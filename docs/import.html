@@ -55,6 +55,11 @@
   #claims div { padding: 2px 0; font-weight: 500; }
   .ok::before { content: "ok  "; color: var(--good); font-weight: 700; }
   .no::before { content: "FAIL  "; color: var(--bad); font-weight: 700; }
+  #layers { margin-top: 8px; display: grid; grid-template-columns: 1fr 1fr; gap: 4px 10px; }
+  #layers label { font-size: 13px; font-weight: 500; display: flex; gap: 6px; align-items: center; }
+  #layers span { color: #0C447C; font-weight: 600; font-variant-numeric: tabular-nums; }
+  #others { margin-top: 6px; font-size: 13px; font-weight: 600; color: #0C447C; }
+  #others:empty { display: none; }
   #status { margin-top: 10px; padding: 8px 10px; border-radius: 8px;
             background: #f5f3ee; font-size: 13px; font-weight: 500;
             border-left: 4px solid var(--line); }
@@ -111,10 +116,24 @@
 
     <div id="panJson" class="terms hide">
       <textarea id="jsonText" spellcheck="false"></textarea>
-      <div class="note">Either one path, <code>[[x,y],[x,y],...]</code>, or
-        several, <code>[[[x,y],...],[[x,y],...]]</code>. Any units at all: the
-        result is fitted to the paper, so only the shape and the aspect ratio
-        survive. y is taken as pointing down, the same way the plotter reads it.</div>
+      <div id="geoPanel" class="hide">
+        <div class="row"><label for="roads">lines as</label>
+          <select id="roads" style="grid-column: 2 / span 2">
+            <option value="edges">both edges, at their width</option>
+            <option value="centre">centre line only</option>
+            <option value="all">edges and centre line</option>
+          </select></div>
+        <div class="row"><label for="ptsize">point size</label>
+          <input type="range" id="ptsize" min="0.1" max="4" step="0.05" value="0.8">
+          <output id="ptsizeV">0.8</output></div>
+        <div id="layers"></div>
+      </div>
+      <div class="note">GeoJSON, with one checkbox per layer. Lines that carry a
+        width, such as roads, can be drawn as both edges. Points, such as trees,
+        become small circles sized as a percentage of the map. Or plain arrays:
+        one path, <code>[[x,y],[x,y],...]</code>, or several,
+        <code>[[[x,y],...],[[x,y],...]]</code>. Any units at all: the result is
+        fitted to the paper, so only the shape and the aspect ratio survive.</div>
     </div>
 
     <div id="panImg" class="terms hide">
@@ -153,6 +172,8 @@
 
   <div class="panel" style="margin-top:14px">
     <h2>paper and pen</h2>
+    <div class="row"><label for="board">plotter</label>
+      <select id="board" style="grid-column: 2 / span 2"></select></div>
     <div class="row"><label for="model">machine</label>
       <select id="model" style="grid-column: 2 / span 2"></select></div>
     <div class="row"><label for="pw">paper</label>
@@ -201,6 +222,7 @@
     <div id="multi" class="warn hide"></div>
     <div id="claims"></div>
     <div id="status">idle</div>
+    <div id="others"></div>
   </div>
 </div>
 </main>
@@ -522,8 +544,160 @@ function parseSvg(text, tolMm, scaleGuess) {
 
 /* ------------------------------------------------------------- json sources */
 
+/* ------------------------------------------------------------ geojson */
+
+// Which layers are switched on, kept across re-parses so a slider change does
+// not reset the ticks. Keyed by layer name.
+const LAYER_ON = {};
+let LAYER_KEY = "";
+// Generator bookkeeping rather than drawing: off by default.
+const LAYER_OFF_BY_DEFAULT = new Set(["extendable", "values"]);
+
+const geomOf = f => (f && f.type === "Feature") ? f.geometry : f;
+
+function geoFeatures(v) {
+  return Array.isArray(v.features) ? v.features : [v];
+}
+
+function walkGeom(g, out, width) {
+  // Collects rings, lines and points. Handles the standard layout, where a
+  // Feature wraps a geometry and keeps width in properties, and the layout
+  // this map generator writes, where the geometry is the feature and a line
+  // carries its own width.
+  if (!g || !g.type) return;
+  const w = g.width !== undefined ? +g.width
+          : (g.properties && g.properties.width !== undefined) ? +g.properties.width
+          : width;
+  const c = g.coordinates;
+  const xy = p => [+p[0], +p[1]];
+  switch (g.type) {
+    case "Point": out.push({ k: "point", p: xy(c) }); break;
+    case "MultiPoint": c.forEach(p => out.push({ k: "point", p: xy(p) })); break;
+    case "LineString": out.push({ k: "line", pts: c.map(xy), w }); break;
+    case "MultiLineString": c.forEach(l => out.push({ k: "line", pts: l.map(xy), w })); break;
+    case "Polygon": c.forEach(r => out.push({ k: "ring", pts: r.map(xy) })); break;
+    case "MultiPolygon": c.forEach(poly => poly.forEach(r => out.push({ k: "ring", pts: r.map(xy) }))); break;
+    case "GeometryCollection": (g.geometries || []).forEach(x => walkGeom(x, out, w)); break;
+  }
+}
+
+function leftNormal(a, b) {
+  const dx = b[0] - a[0], dy = b[1] - a[1], L = Math.hypot(dx, dy) || 1;
+  return [-dy / L, dx / L];
+}
+
+function offsetLine(pts, d) {
+  // One edge of a road, d either side of the centre line. Mitred at the
+  // corners, with the mitre capped so a hairpin does not throw a spike.
+  const q = pts.filter((p, i) => !i || Math.hypot(p[0] - pts[i-1][0], p[1] - pts[i-1][1]) > 1e-9);
+  if (q.length < 2) return [];
+  const n = q.length, out = [];
+  for (let i = 0; i < n; i++) {
+    const n1 = leftNormal(q[Math.max(0, i - 1)], q[Math.max(1, i)]);
+    const n2 = leftNormal(q[Math.min(n - 2, i)], q[Math.min(n - 1, i + 1)]);
+    let nx = n1[0] + n2[0], ny = n1[1] + n2[1];
+    const L = Math.hypot(nx, ny);
+    if (L < 1e-9) { nx = n1[0]; ny = n1[1]; } else { nx /= L; ny /= L; }
+    const k = d / Math.max(nx * n1[0] + ny * n1[1], 0.3);
+    out.push([q[i][0] + nx * k, q[i][1] + ny * k]);
+  }
+  return out;
+}
+
+function circleAt(p, r) {
+  const o = [];
+  for (let i = 0; i <= 20; i++) {
+    const t = i / 20 * TAU;
+    o.push([p[0] + r * Math.cos(t), p[1] + r * Math.sin(t)]);
+  }
+  return o;
+}
+
+function buildLayerList(layers) {
+  const key = layers.map(l => l.name).join("|");
+  $("geoPanel").classList.remove("hide");
+  if (key === LAYER_KEY) return;
+  LAYER_KEY = key;
+  for (const l of layers)
+    if (!(l.name in LAYER_ON))
+      LAYER_ON[l.name] = !LAYER_OFF_BY_DEFAULT.has(l.name) && l.count > 0;
+  $("layers").innerHTML = layers.map(l =>
+    `<label><input type="checkbox" data-layer="${l.name}" ${LAYER_ON[l.name] ? "checked" : ""}` +
+    `${l.count ? "" : " disabled"}> ${l.name} <span>${l.count}</span></label>`).join("");
+  for (const cb of $("layers").querySelectorAll("input"))
+    cb.addEventListener("change", () => { LAYER_ON[cb.dataset.layer] = cb.checked; render(); });
+}
+
+function parseGeo(v) {
+  // Group features into layers by id, then name, then geometry type. A file
+  // with a separate feature per building would otherwise give one checkbox
+  // per building, so past two dozen names it falls back to geometry type.
+  const feats = geoFeatures(v);
+  const named = feats.map((f, i) => {
+    const p = f.properties || {};
+    const g = geomOf(f);
+    return { f, name: String(f.id ?? p.layer ?? p.name ?? p.id ?? (g && g.type) ?? ("layer " + i)) };
+  });
+  if (new Set(named.map(n => n.name)).size > 24)
+    named.forEach(n => { const g = geomOf(n.f); n.name = g ? g.type : "other"; });
+
+  const layers = [], byName = {};
+  for (const { f, name } of named) {
+    if (!byName[name]) { byName[name] = { name, prims: [] }; layers.push(byName[name]); }
+    walkGeom(geomOf(f), byName[name].prims, (f.properties || {}).width);
+  }
+  for (const l of layers) l.count = l.prims.length;
+  buildLayerList(layers);
+
+  // Point circles are sized against the whole map, so a slider value means
+  // the same thing on a village and on a continent.
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  for (const l of layers) for (const pr of l.prims)
+    for (const q of (pr.k === "point" ? [pr.p] : pr.pts)) {
+      if (q[0] < x0) x0 = q[0];
+      if (q[0] > x1) x1 = q[0];
+      if (q[1] < y0) y0 = q[1];
+      if (q[1] > y1) y1 = q[1];
+    }
+  const span = Math.max(x1 - x0, y1 - y0) || 1;
+  const r = span * (+$("ptsize").value) / 100;
+  $("ptsizeV").textContent = $("ptsize").value;
+  const mode = $("roads").value;
+
+  const out = [], off = [];
+  for (const l of layers) {
+    if (!LAYER_ON[l.name]) { if (l.count) off.push(l.name); continue; }
+    for (const pr of l.prims) {
+      if (pr.k === "point") { out.push(circleAt(pr.p, r)); continue; }
+      if (pr.k === "ring") {
+        const q = pr.pts.slice();
+        const a = q[0], b = q[q.length - 1];
+        if (a[0] !== b[0] || a[1] !== b[1]) q.push(a.slice());
+        if (q.length >= 3) out.push(q);
+        continue;
+      }
+      const edges = pr.w > 0 && mode !== "centre";
+      if (edges) {
+        const e1 = offsetLine(pr.pts, pr.w / 2), e2 = offsetLine(pr.pts, -pr.w / 2);
+        if (e1.length > 1) out.push(e1);
+        if (e2.length > 1) out.push(e2);
+      }
+      if ((!edges || mode === "all") && pr.pts.length > 1) out.push(pr.pts);
+    }
+  }
+  NOTE = off.length ? `layers off: ${off.join(", ")}` : "";
+  if (!out.length) throw new Error("every layer with something in it is switched off");
+  // GeoJSON has y pointing up, north at the top. Everything else here, and the
+  // plotter, has y pointing down, so without this every map came out upside
+  // down. Checked against the same map's own svg export: with y flipped, 150
+  // of 150 building corners land on the svg's points; without, 31.
+  return out.map(p => p.map(q => [q[0], -q[1]]));
+}
+
 function parseJson(text) {
   const v = JSON.parse(text);
+  if (v && !Array.isArray(v) && typeof v === "object") return parseGeo(v);
+  $("geoPanel").classList.add("hide");
   if (!Array.isArray(v) || !v.length) throw new Error("expected a non-empty array");
   const isPt = p => Array.isArray(p) && p.length >= 2 &&
                     Number.isFinite(+p[0]) && Number.isFinite(+p[1]);
@@ -822,7 +996,11 @@ function stats(fit) {
       travel += Math.hypot(p[0][0]-a[0], p[0][1]-a[1]);
     }
   });
-  const est = (len + travel) / (2.18 * +$("speed").value);
+  // Lifts matter: each stroke costs a pen raise and lower, roughly half a
+  // second. Without this a 17,761 stroke map claimed 16 minutes when the
+  // lifts alone come to about two and a half hours.
+  const lifts = $("join").checked ? 1 : fit.paths.length;
+  const est = len / (2.18 * +$("speed").value) + travel / (2.18 * 75) + lifts * 0.5;
   $("sPaths").textContent = fit.paths.length;
   $("sPts").textContent = pts;
   $("sLen").textContent = Math.round(len);
@@ -838,15 +1016,20 @@ function stats(fit) {
   if (fit.paths.length > 1)
     $("multi").textContent = $("join").checked
       ? `${fit.paths.length} paths will be drawn as one line: the ${Math.round(travel)} mm of travel shown in red gets inked too.`
-      : `${fit.paths.length} separate paths. The plot endpoint draws one continuous polyline, so it cannot lift the pen between them. Download the svg, or tick join paths and accept the travel lines.`;
-  if (!DEMO) $("bPlot").disabled = many;
+      : `${fit.paths.length} separate paths. The pen lifts between them, which adds ${Math.round(fit.paths.length * 0.5 / 60)} min of lifting and ${Math.round(travel)} mm of pen-up travel but no ink. The estimate includes both.`;
+  if (!DEMO) $("bPlot").disabled = !fit.paths.length;
 }
 
 /* ------------------------------------------------------------------ plotter */
 
 const flatPoints = () => CUR.paths.flat();
 
-const payload = () => ({ points: flatPoints(), model: +$("model").value,
+// Separate paths go as "paths" so the server can lift the pen between them.
+// Joined, it is one line, and "points" is what the curve studio sends too.
+const payload = () => ({
+  ...($("join").checked || CUR.paths.length < 2
+      ? { points: flatPoints() } : { paths: CUR.paths }),
+  port: $("board").value, model: +$("model").value,
   speed: +$("speed").value, pen_up: +$("penUp").value,
   pen_down: +$("penDown").value, preview: $("prev").checked });
 
@@ -857,8 +1040,7 @@ function setStatus(state, msg) {
   const el = $("status"); el.className = state; el.textContent = msg;
   if (DEMO) return;
   $("bStop").disabled = state !== "running";
-  $("bPlot").disabled = state === "running" ||
-    (CUR ? CUR.paths.length > 1 && !$("join").checked : true);
+  $("bPlot").disabled = state === "running" || !CUR || !CUR.paths.length;
 }
 
 async function post(path) {
@@ -880,8 +1062,10 @@ async function check() {
   const d = await post("/api/check");
   if (!d) return;
   showClaims(d.claims);
+  const mins = Math.round(d.estimate_s / 60);
   setStatus(d.ok ? "idle" : "error", d.ok
-    ? `fits the machine. ${d.segments} segments, ${d.length_mm} mm of line`
+    ? `fits the machine. ${d.paths} paths, ${d.length_mm} mm of ink, ` +
+      `${d.travel_mm} mm pen-up, roughly ${mins} min`
     : "does not fit the machine, see above");
 }
 
@@ -893,17 +1077,63 @@ async function plot() {
 }
 
 async function stopPlot() {
-  try { await fetch("/api/stop", { method: "POST" }); }
-  catch (e) { setStatus("error", `could not reach the Pi: ${e}`); }
+  // Named, so stopping one machine never stops the other.
+  try {
+    const r = await fetch("/api/stop", { method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ port: $("board").value }) });
+    const d = await r.json();
+    if (!d.ok) setStatus("error", d.message);
+  } catch (e) { setStatus("error", `could not reach the Pi: ${e}`); }
 }
 
+async function refreshBoards() {
+  // With two machines attached the driver cannot choose, so the board has to
+  // be named. Rebuilding the list resets the selection, so carry it across.
+  const sel = $("board");
+  if (DEMO) {
+    sel.innerHTML = '<option value="">no plotter in demo mode</option>';
+    sel.disabled = true;
+    return;
+  }
+  try {
+    const bs = ((await (await fetch("/api/boards")).json()).boards) || [];
+    const keep = sel.value;
+    sel.innerHTML = !bs.length ? '<option value="">none found</option>' :
+      (bs.length > 1 ? "" : '<option value="">auto</option>') +
+      bs.map(b => `<option value="${b.nickname || b.device}">` +
+        `${b.label}${b.busy ? " (busy)" : ""}</option>`).join("");
+    if ([...sel.options].some(o => o.value === keep)) sel.value = keep;
+  } catch (e) {
+    sel.innerHTML = '<option value="">could not list</option>';
+  }
+}
+
+let pollTimer = null;
+
 async function poll() {
-  const d = await (await fetch("/api/status")).json();
-  const pct = d.total ? Math.round(100*d.done/d.total) : 0;
-  const left = d.remaining_s ? `, about ${Math.round(d.remaining_s/60)} min left` : "";
+  // Never stop polling. One failed fetch used to kill this chain and freeze
+  // the status for the rest of a plot while the machine kept drawing.
+  clearTimeout(pollTimer);
+  let d = null;
+  try {
+    const q = encodeURIComponent($("board").value || "");
+    d = await (await fetch(`/api/status?port=${q}`, { cache: "no-store" })).json();
+  } catch (e) {
+    pollTimer = setTimeout(poll, 3000);
+    return;
+  }
+  const pct = d.total ? Math.round(100 * d.done / d.total) : 0;
+  const left = d.remaining_s ? `, about ${Math.round(d.remaining_s / 60)} min left` : "";
+  const who = d.board ? `${d.board}: ` : "";
   setStatus(d.state, d.state === "running"
-    ? `${d.message}, ${pct}% (${d.done}/${d.total})${left}` : d.message);
-  if (d.busy) setTimeout(poll, 1200);
+    ? `${who}${d.message}, ${pct}%${left}` : who + d.message);
+  $("others").textContent = (d.others || []).map(o =>
+    `${o.board}: ${o.state}${o.state === "running" ? ` ${o.pct}%` : ""}` +
+    (o.remaining_s ? `, about ${Math.round(o.remaining_s / 60)} min left` : "")
+  ).join("   |   ");
+  const anyBusy = d.busy || (d.others || []).some(o => o.state === "running");
+  pollTimer = setTimeout(poll, anyBusy ? 1200 : 5000);
 }
 
 function downloadSvg() {
@@ -1003,6 +1233,8 @@ async function fileChosen(e) {
 
   $("src").addEventListener("change", () => { syncPanels(); render(); });
   $("file").addEventListener("change", fileChosen);
+  $("roads").addEventListener("change", render);
+  $("ptsize").addEventListener("input", render);
   ["tol","minlen","spacing","amount","wave","angle","gamma","thresh","cover",
    "invert","imode","pw","ph","margin","rot90","flipy","speed","penDown",
    "penUp","join"].forEach(id => $(id).addEventListener("input", render));
@@ -1021,6 +1253,8 @@ async function fileChosen(e) {
       $(b).title = "needs a plotter and the piplot server";
     }
   }
+  await refreshBoards();
+  $("board").addEventListener("change", () => poll());
   $("bCheck").onclick = check;
   $("bPlot").onclick = plot;
   $("bStop").onclick = stopPlot;
