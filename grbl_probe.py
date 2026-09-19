@@ -120,6 +120,100 @@ def restore_settings(sp, path):
     return 0
 
 
+def state_of(sp):
+    """GRBL's state word and machine position, or None if it did not answer."""
+    sp.reset_input_buffer()
+    sp.write(b"?")
+    time.sleep(0.2)
+    reply = sp.read(sp.in_waiting or 1).decode(errors="replace")
+    if "<" not in reply or "MPos:" not in reply:
+        return None
+    body = reply.split("<", 1)[1].split(">", 1)[0]
+    word = body.split("|", 1)[0].strip()
+    mpos = body.split("MPos:", 1)[1].split("|", 1)[0]
+    return word, tuple(float(v) for v in mpos.split(",")[:3])
+
+
+def wait_idle(sp, timeout=180.0):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        st = state_of(sp)
+        if st and st[0].startswith("Idle"):
+            return st
+        if st and st[0].startswith("Alarm"):
+            return st
+        time.sleep(0.25)
+    return None
+
+
+def corner_walk(sp, travel, inset, feed, pause):
+    """Walk the envelope corners pen up, refusing to move on a position it doubts.
+
+    The guard is the point of this, not the walking. GRBL has no homing here,
+    so its position means nothing after a reset, and opening the serial port
+    resets the board. A leg was once sent from a zero the board had quietly
+    moved, which put the carriage a whole inset past where it was meant to be.
+    Nothing reported it, because nothing was checking.
+
+    So every leg states where it believes the machine is, and stops if the
+    machine disagrees. Position is a claim to be verified, exactly like the
+    travel envelope, not a number to be trusted because it was true earlier.
+    """
+    tx, ty = travel
+    i = inset
+    legs = [(i, i), (tx - i, i), (tx - i, ty - i), (i, ty - i), (i, i), (0.0, 0.0)]
+
+    st = state_of(sp)
+    if not st:
+        print("the board did not answer a status query", file=sys.stderr)
+        return 1
+    if st[1] != (0.0, 0.0, 0.0):
+        print(f"expected a freshly reset board at 0,0,0 but it reports {st[1]}",
+              file=sys.stderr)
+        return 1
+
+    print(f"envelope {tx:.0f} x {ty:.0f} mm, inset {i:.0f} mm, feed {feed} mm/min")
+    print("zeroing here, so the carriage must be parked at the bottom left")
+    for cmd in ("G21", "G90", "G94", "G10 L20 P0 X0 Y0 Z0"):
+        ask(sp, cmd, 0.3)
+    print("pen up")
+    ask(sp, "G0 Z1", 1.2)
+
+    at = (0.0, 0.0)
+    for n, (x, y) in enumerate(legs, 1):
+        st = state_of(sp)
+        if not st:
+            print("\nABORT: the board stopped answering", file=sys.stderr)
+            return 1
+        # A reset zeroes MPos while the carriage stays put, so a position that
+        # has jumped is the tell that everything after it would be offset.
+        if max(abs(st[1][0] - at[0]), abs(st[1][1] - at[1])) > 0.05:
+            print(f"\nABORT before leg {n}: expected to be at {at}, "
+                  f"but the board says {st[1][:2]}. The board has most likely "
+                  f"reset, which moves its zero to wherever the carriage is. "
+                  f"Re-park the carriage by hand and start again.", file=sys.stderr)
+            return 1
+        print(f"  leg {n} of {len(legs)}   {at} -> ({x:.0f}, {y:.0f})")
+        sys.stdout.flush()
+        ask(sp, f"G1 X{x:.3f} Y{y:.3f} F{feed}", 0.2)
+        st = wait_idle(sp)
+        if not st:
+            print(f"\nABORT: leg {n} did not finish", file=sys.stderr)
+            return 1
+        if st[0].startswith("Alarm"):
+            print(f"\nABORT: the board is in {st[0]} after leg {n}", file=sys.stderr)
+            return 1
+        if max(abs(st[1][0] - x), abs(st[1][1] - y)) > 0.05:
+            print(f"\nABORT: leg {n} should have ended at ({x}, {y}) "
+                  f"but the board says {st[1][:2]}", file=sys.stderr)
+            return 1
+        at = (x, y)
+        time.sleep(pause)
+
+    print("\nall corners reached, pen never lowered, carriage back at the origin")
+    return 0
+
+
 def pen_pass(sp, heights, gap):
     """Lift and lower once per height, so each lift is judged on its own.
 
@@ -149,6 +243,14 @@ def main() -> int:
                    help="Z heights to try with --pen, comma separated")
     p.add_argument("--spindle", action="store_true",
                    help="try the M3/M5 spindle route instead, for an unknown board")
+    p.add_argument("--corners", metavar="WxH",
+                   help="walk the envelope corners pen up, e.g. 297x420")
+    p.add_argument("--inset", type=float, default=20.0,
+                   help="mm in from the envelope for the corner walk")
+    p.add_argument("--feed", type=int, default=600,
+                   help="mm/min for the corner walk, slow enough to react to")
+    p.add_argument("--pause", type=float, default=2.0,
+                   help="seconds to hold at each corner")
     p.add_argument("--save", metavar="FILE", help="write the board's settings to a file")
     p.add_argument("--restore", metavar="FILE", help="send a saved settings file back")
     p.add_argument("--gap", type=float, default=4.0, help="seconds between commands")
@@ -180,6 +282,9 @@ def main() -> int:
             return restore_settings(sp, args.restore)
         if args.save:
             return save_settings(sp, args.save, build)
+        if args.corners:
+            w, h = (float(v) for v in args.corners.lower().split("x"))
+            return corner_walk(sp, (w, h), args.inset, args.feed, args.pause)
 
         identify(sp)
 

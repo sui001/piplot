@@ -15,9 +15,17 @@ The motif is chosen to fail in the three ways speed makes things fail:
 
     python speed_ladder.py --port axidraw-0 --dry
     python speed_ladder.py --port axidraw-0 --speeds 25,40,55,70,85,100
+    python speed_ladder.py --driver grbl --travel 297x420 --paper 297x420 \
+        --speeds 1000,2000,3000,4000,5000 --cols 2
 
-Park the carriage in the home corner first. The machine has no home switches
-and believes it starts at (0, 0).
+The two drivers mean different things by a speed. The AxiDraw takes a
+percentage of its own maximum; GRBL takes a feed rate in mm/min, capped by
+$110/$111, which is 5000 on the CoreXY machine. Asking for more than the cap
+is not an error, it is silently clamped, so a ladder that runs past it shows
+two cells with identical times and nothing to say why.
+
+Park the carriage in the home corner first. Neither machine has home switches
+and both believe they start at (0, 0).
 """
 
 from __future__ import annotations
@@ -96,6 +104,65 @@ def mm_pair(text):
     return (float(a), float(b))
 
 
+def report(results, varying):
+    print()
+    print(f"  {varying:6}  line mm   seconds   actual mm/s   vs first")
+    print("  " + "-" * 50)
+    base = results[0][2] if results else 1
+    for shown, mm, dt in results:
+        print(f"  {shown:5}   {mm:8.0f}  {dt:8.1f}  {mm / dt:11.1f}   {base / dt:5.2f}x")
+    print()
+    print("Now look at the sheet, not the table. The fastest cell that still")
+    print("has clean corners, no wobble on the rosette and solid hatch lines")
+    print("is your speed for that pen.")
+
+
+def run_grbl(args, cells, travel, varying) -> int:
+    """The same ladder on the GRBL machine, where a speed is a feed in mm/min.
+
+    The timings here carry more overhead than the AxiDraw's do, and it is worth
+    knowing which part is which before reading the table. Every path costs a
+    pen lift, and on this machine a lift is a Z move plus a dwell for the servo
+    to physically arrive. The motif has about twenty five paths, so roughly
+    fifteen seconds a cell is servo, not drawing, and it is the same fifteen
+    seconds in every cell. That flattens the ratios at the fast end: the cells
+    stop looking faster long before the machine stops going faster.
+    """
+    from plotter import Grbl
+
+    device = args.port or "/dev/ttyUSB0"
+    g = Grbl(port=device, travel=travel)
+
+    lock = hold(device)
+    if not lock.__enter__():
+        print(f"{device} is in use by something else", file=sys.stderr)
+        return 1
+
+    print(f"connecting to {device}")
+    print("the carriage's current position becomes 0,0, so it must be parked "
+          "at the bottom left")
+    results = []
+    try:
+        g.connect()
+        for shown, sp, ac, paths in cells:
+            g.feed = sp
+            mm = sum(math.dist(path[i - 1], path[i])
+                     for path in paths for i in range(1, len(path)))
+            print(f"  {shown:5}  ({sp} mm/min)  {mm:.0f} mm ...", end="", flush=True)
+            t0 = time.time()
+            for path in paths:
+                g.draw_path(path)
+            dt = time.time() - t0
+            print(f" {dt:6.1f}s   {mm / dt:5.1f} mm/s actual")
+            results.append((shown, mm, dt))
+    finally:
+        g.disconnect()
+        lock.__exit__(None, None, None)
+
+    report(results, varying)
+    return 0
+
+
 def main() -> int:
     p = argparse.ArgumentParser(description="plot one motif at several speeds and time each")
     p.add_argument("--speeds", default="25,40,55,70,85,100",
@@ -107,6 +174,9 @@ def main() -> int:
     p.add_argument("--speed", type=int, default=55,
                    help="fixed pen-down speed, when laddering acceleration")
     p.add_argument("--model", type=int, default=2, choices=sorted(MODELS))
+    p.add_argument("--driver", choices=("axidraw", "grbl"), default="axidraw")
+    p.add_argument("--travel", type=mm_pair, default=None,
+                   help="grbl only: the envelope, since GRBL does not know its own")
     p.add_argument("--paper", type=mm_pair, default=(420.0, 297.0))
     p.add_argument("--margin", type=float, default=18.0)
     p.add_argument("--cols", type=int, default=3)
@@ -133,7 +203,11 @@ def main() -> int:
     print("https://github.com/sui001/piplot")
     print()
 
-    tx, ty, name = MODELS[args.model]
+    if args.driver == "grbl":
+        tx, ty = args.travel or (297.0, 420.0)
+        name = "GRBL CoreXY (suidraw-0)"
+    else:
+        tx, ty, name = MODELS[args.model]
     pw, ph = args.paper
     cols = min(args.cols, len(speeds))
     rows = math.ceil(len(speeds) / cols)
@@ -142,12 +216,17 @@ def main() -> int:
     lab_h = min(7.0, ch * 0.12)
     size = min(cw, ch - lab_h * 2.2) * 0.86
 
-    print(f"machine  model {args.model}, {name}, travel {tx:.0f} x {ty:.0f} mm")
+    print(f"machine  {args.driver}, {name}, travel {tx:.0f} x {ty:.0f} mm")
     print(f"sheet    {pw:.0f} x {ph:.0f} mm, {cols} x {rows} cells of "
           f"{cw:.0f} x {ch:.0f} mm, motif {size:.0f} mm")
     if varying == "accel":
         print(f"laddering ACCELERATION: {', '.join(str(v) for v in vals)}"
               f"   at fixed speed {args.speed}%")
+    elif args.driver == "grbl":
+        # Not percentages, and not args.accel either: acceleration on this
+        # machine lives in $120/$121 on the board, not in anything sent to it.
+        print(f"laddering FEED: {', '.join(str(v) + ' mm/min' for v in vals)}"
+              f"   at the board's own accel ($120/$121)")
     else:
         print(f"laddering SPEED: {', '.join(str(v) + '%' for v in vals)}"
               f"   at fixed accel {args.accel}")
@@ -170,8 +249,17 @@ def main() -> int:
               f"x spans {min(xs):.0f} to {max(xs):.0f} mm, machine has 0 to {tx:.0f}")
     c.require("cells fit the travel envelope in y", min(ys) >= 0 and max(ys) <= ty,
               f"y spans {min(ys):.0f} to {max(ys):.0f} mm, machine has 0 to {ty:.0f}")
-    c.require("every value is a usable percentage",
-              all(1 <= v <= 100 for v in vals))
+    if args.driver == "grbl":
+        # GRBL clamps a feed above $110/$111 without complaining, so two cells
+        # past the cap would draw at the same speed and the sheet would look
+        # like the machine had stopped improving when really it had stopped
+        # being asked for more.
+        c.require("every feed is within the machine's max rate",
+                  all(1 <= v <= 5000 for v in vals),
+                  "over 5000 mm/min is silently clamped by $110/$111")
+    else:
+        c.require("every value is a usable percentage",
+                  all(1 <= v <= 100 for v in vals))
     c.require("the motif is big enough to read", size >= 20.0, f"{size:.0f} mm")
     print()
 
@@ -182,12 +270,31 @@ def main() -> int:
     total = sum(len(path) for *_, ps in cells for path in ps)
     print(f"{len(cells)} cells, {total} points total")
     if args.dry:
+        grand = 0.0
         for shown, sp, ac, ps in cells:
             n = sum(len(x) for x in ps)
-            print(f"  {shown:3}  speed {sp:3}% accel {ac:3}  "
-                  f"{len(ps):3} paths  {n:5} points")
+            mm = sum(math.dist(path[i - 1], path[i])
+                     for path in ps for i in range(1, len(path)))
+            if args.driver == "grbl":
+                # A lift is a Z move plus a dwell each way, and it is paid once
+                # per path whatever the feed, which is why the fast cells save
+                # far less than their feed suggests.
+                est = mm / (sp / 60.0) + len(ps) * 0.8
+                grand += est
+                print(f"  {shown:5}  {sp:5} mm/min  {len(ps):3} paths  "
+                      f"{n:5} points  {mm:6.0f} mm  about {est:5.0f} s")
+            else:
+                print(f"  {shown:3}  speed {sp:3}% accel {ac:3}  "
+                      f"{len(ps):3} paths  {n:5} points")
+        if grand:
+            print(f"\n  estimated total about {grand / 60:.0f} min, "
+                  f"of which roughly "
+                  f"{sum(len(ps) for *_, ps in cells) * 0.8 / 60:.0f} min is pen lifts")
         print("\ndry run, nothing moved")
         return 0
+
+    if args.driver == "grbl":
+        return run_grbl(args, cells, (tx, ty), varying)
 
     from pyaxidraw import axidraw
 

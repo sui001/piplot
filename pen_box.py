@@ -11,9 +11,14 @@ below is a lie.
 
     python pen_box.py --model 2 --paper 420x297 --inset 20
     python pen_box.py --model 1 --paper 297x210 --inset 20 --dry
+    python pen_box.py --driver grbl --travel 420x297 --port /dev/ttyUSB0
 
 Origin is the home corner, x to the right, y down the page, mm throughout,
-which is the same frame plan.py maps room coordinates into.
+which is the same frame plan.py maps room coordinates into. The GRBL machine
+runs y the other way and the backend flips it, so a correct sheet looks the
+same off either machine. That is what --mark is for: it cuts a diagonal across
+the top left corner, so the paper itself says whether the frame came out
+mirrored rather than leaving it to be argued about.
 """
 
 from __future__ import annotations
@@ -24,7 +29,7 @@ import time
 
 from portlock import hold
 
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 
 # pyaxidraw model number -> (travel x mm, travel y mm, name).
 # Straight off the AxiDraw model table. These are hard machine limits, not
@@ -69,6 +74,56 @@ def mm_pair(text: str):
         raise argparse.ArgumentTypeError("expected WIDTHxHEIGHT in mm, e.g. 420x297")
 
 
+def plot_grbl(args, paths, travel) -> int:
+    """Draw the box on the GRBL machine, via the Grbl backend in plotter.py.
+
+    The preview lap matters more here than on an AxiDraw. That machine at least
+    knows its own travel; this one has $20=0 and $130/$131 left at 5000, so it
+    believes it is five metres wide and the only thing standing between a bad
+    number and a rail end is the claim the backend makes before it moves.
+    """
+    from plotter import Grbl
+
+    device = args.port or "/dev/ttyUSB0"
+    g = Grbl(port=device, travel=travel, feed=args.speed * 40)
+
+    bad = g.check([q for p in paths for q in p])
+    if bad:
+        print("REFUSING TO MOVE: " + "; ".join(bad), file=sys.stderr)
+        return 1
+
+    lock = hold(device)
+    if not lock.__enter__():
+        print(f"{device} is in use by something else", file=sys.stderr)
+        return 1
+
+    print(f"connecting to {device}")
+    print("the carriage's current position becomes 0,0, so it must be parked "
+          "at the bottom left corner")
+    try:
+        g.connect()
+
+        if not args.no_preview:
+            print("pen-up lap, watch it before anything is committed to paper")
+            g.penup()
+            for x, y in paths[0]:
+                g.goto(x, y)
+            g._wait_idle(timeout=120)
+            time.sleep(1.0)
+
+        for n, path in enumerate(paths, 1):
+            print(f"drawing path {n} of {len(paths)}")
+            g.draw_path(path)
+
+        print("returning home")
+    finally:
+        g.disconnect()
+        lock.__exit__(None, None, None)
+
+    print("done, pen up, carriage home")
+    return 0
+
+
 def main() -> int:
     p = argparse.ArgumentParser(description="draw an inset rectangle on the paper")
     p.add_argument("--model", type=int, default=2, choices=sorted(MODELS),
@@ -82,6 +137,15 @@ def main() -> int:
                    help="skip the pen-up lap and go straight to drawing")
     p.add_argument("--port", default=None,
                    help="board nickname or device path; needed with two machines")
+    p.add_argument("--driver", choices=("axidraw", "grbl"), default="axidraw",
+                   help="which backend; grbl is the homemade CoreXY machine")
+    p.add_argument("--travel", type=mm_pair, default=None,
+                   help="grbl only: the machine envelope, since GRBL does not "
+                        "know its own ($130/$131 are left at 5000)")
+    p.add_argument("--mark", action="store_true", default=True,
+                   help="cut a diagonal across the top left corner, so the "
+                        "sheet shows whether the frame came out mirrored")
+    p.add_argument("--no-mark", dest="mark", action="store_false")
     p.add_argument("--dry", action="store_true",
                    help="check the claims and print the path, move nothing")
     args = p.parse_args()
@@ -91,12 +155,18 @@ def main() -> int:
     print("https://github.com/sui001/piplot")
     print()
 
-    tx, ty, name = MODELS[args.model]
+    if args.driver == "grbl":
+        # GRBL has no model table to look the envelope up in, and its own
+        # $130/$131 are left at 5000, so the number has to be supplied.
+        tx, ty = args.travel or (420.0, 297.0)
+        name = "GRBL CoreXY (suidraw-0)"
+    else:
+        tx, ty, name = MODELS[args.model]
     pw, ph = args.paper
     i = args.inset
     x0, y0, x1, y1 = i, i, pw - i, ph - i
 
-    print(f"machine  model {args.model}, {name}, travel {tx:.0f} x {ty:.0f} mm")
+    print(f"machine  {args.driver}, {name}, travel {tx:.0f} x {ty:.0f} mm")
     print(f"paper    {pw:.0f} x {ph:.0f} mm, inset {i:.0f} mm")
     print(f"box      ({x0:.0f}, {y0:.0f}) to ({x1:.0f}, {y1:.0f}) "
           f"= {x1 - x0:.0f} x {y1 - y0:.0f} mm")
@@ -122,12 +192,27 @@ def main() -> int:
 
     corners = [(x0, y0), (x1, y0), (x1, y1), (x0, y1), (x0, y0)]
 
+    # A plain rectangle is symmetrical, so it looks identical whether or not
+    # the frame came out mirrored. The diagonal is what makes the sheet
+    # readable: it chops the TOP LEFT corner, and top left is the origin corner
+    # in this frame, so if the triangle lands anywhere else the mapping is
+    # wrong. The GRBL machine runs y the other way up, which makes this the
+    # cheapest possible check on the backend's flip.
+    m = min(40.0, (x1 - x0) / 3, (y1 - y0) / 3)
+    mark = [(x0, y0 + m), (x0 + m, y0)]
+    paths = [corners, mark] if args.mark else [corners]
+
     if args.dry:
-        print("dry run, path would be:")
-        for n, (x, y) in enumerate(corners):
-            print(f"  {n}  {x:7.1f}, {y:7.1f}")
+        print("dry run, paths would be:")
+        for pn, path in enumerate(paths, 1):
+            print(f"  path {pn}")
+            for n, (x, y) in enumerate(path):
+                print(f"    {n}  {x:7.1f}, {y:7.1f}")
         print("\nnothing moved")
         return 0
+
+    if args.driver == "grbl":
+        return plot_grbl(args, paths, (tx, ty))
 
     from pyaxidraw import axidraw
 
