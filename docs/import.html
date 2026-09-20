@@ -64,6 +64,9 @@
             background: #f5f3ee; font-size: 13px; font-weight: 500;
             border-left: 4px solid var(--line); }
   #status.running { border-left-color: var(--accent); }
+  /* Something is in flight that is not a plot, so Stop must stay disabled:
+     "running" would have armed it and pointed it at a plotter. */
+  #status.working { border-left-color: var(--accent); }
   #status.done { border-left-color: var(--good); }
   #status.error, #status.stopped { border-left-color: var(--bad); }
   .hide { display: none; }
@@ -92,17 +95,34 @@
     <div class="row"><label for="src">kind</label>
       <select id="src" style="grid-column: 2 / span 2">
         <option value="svg">svg, paths and shapes</option>
+        <option value="pdf">pdf, vector geometry</option>
         <option value="json">json, points</option>
         <option value="img">raster image, interpreted</option>
       </select></div>
     <div class="row"><label for="file">file</label>
       <input type="file" id="file" style="grid-column: 2 / span 2"></div>
 
-    <div id="panSvg" class="terms">
+    <!-- Shared by svg and pdf: both arrive as curves and both are flattened
+         by the same code, so they are steered by the same two controls. -->
+    <div id="panGeom" class="terms">
       <div class="row"><label for="tol">tolerance</label>
         <input type="range" id="tol" min="0.02" max="1" step="0.01" value="0.1"><output id="tolV"></output></div>
       <div class="row"><label for="minlen">drop under</label>
         <input type="range" id="minlen" min="0" max="10" step="0.1" value="0"><output id="minlenV"></output></div>
+    </div>
+
+    <div id="panPdf" class="terms hide">
+      <div class="note">The pdf is sent to the plotter's pi, which pulls the
+        vector geometry out of <strong>page one</strong> and sends back the
+        curves, still curved. They are then flattened here by the same code
+        that flattens svg, to the same tolerance, so the two sources behave
+        identically. Outlines only: fills, clipping, images and text are
+        ignored, so convert text to outlines first. A pdf of a scan holds no
+        geometry and will come back empty. Needs the plotter, so this one
+        source does not work on the public demo page.</div>
+    </div>
+
+    <div id="panSvg" class="terms">
       <textarea id="svgText" spellcheck="false"></textarea>
       <div class="note">Curves are flattened until no control point sits further
         than the tolerance, in finished millimetres on the paper, from the chord
@@ -253,6 +273,8 @@ const MAXPTS = 160000;
 
 let CUR = null;      // the same fitted to paper, plus the numbers about it
 let SVGTEXT = "";    // kept so the tolerance slider can reparse without the file
+let PDFDOC = null;   // the pi's reply, kept for the same reason: moving the
+                     // tolerance slider must not re-upload the pdf
 let IMG = null;      // { w, h, data } luminance grid, 0 dark to 1 light
 let NOTE = "";       // anything the generator wants to admit to
 
@@ -558,6 +580,65 @@ function parseSvg(text, tolMm, scaleGuess) {
   return out;
 }
 
+/* --------------------------------------------------------------------- pdf */
+
+// The pi pulls the geometry out of the pdf and sends back control points, not
+// points on a line. Flattening happens here, through the same cubic() the svg
+// importer uses, so the tolerance slider means one thing across both sources
+// and there is only ever one subdivision to get right.
+
+function parsePdf(doc, tolMm, scaleGuess) {
+  // No per-element transform to come back through: the pi already returns
+  // everything in one page coordinate frame.
+  const tol = tolMm / scaleGuess;
+  const out = [];
+  let cur = null;
+
+  const flush = () => {
+    if (cur && cur.length >= 2) out.push(cur);
+    cur = null;
+  };
+  // A pdf path is a run of items that mostly join end to end, but not always:
+  // one drawing can hold several disjoint subpaths. Start a new polyline
+  // whenever an item does not carry on from where the last one stopped.
+  const startAt = p => {
+    if (!cur || Math.hypot(cur[cur.length-1][0] - p[0],
+                           cur[cur.length-1][1] - p[1]) > 1e-6) {
+      flush();
+      cur = [p];
+    }
+  };
+
+  for (const path of doc.paths || []) {
+    cur = null;
+    for (const it of path.items) {
+      if (it[0] === "l") {
+        startAt(it[1]);
+        cur.push(it[2]);
+      } else if (it[0] === "c") {
+        startAt(it[1]);
+        cubic(cur, it[1], it[2], it[3], it[4], tol, 0);
+      } else if (it[0] === "re") {
+        // A rectangle is its own closed loop, never a continuation.
+        flush();
+        const [x0, y0, x1, y1] = it[1];
+        out.push([[x0,y0], [x1,y0], [x1,y1], [x0,y1], [x0,y0]]);
+      } else if (it[0] === "qu") {
+        flush();
+        out.push([it[1], it[2], it[3], it[4], it[1]]);
+      }
+    }
+    // closePath is a property of the whole pdf path, and the subpath still
+    // open at the end of it is the one it closes.
+    if (path.closed && cur && cur.length >= 3) {
+      const a = cur[0], b = cur[cur.length - 1];
+      if (Math.hypot(a[0]-b[0], a[1]-b[1]) > 1e-6) cur.push([a[0], a[1]]);
+    }
+    flush();
+  }
+  return out;
+}
+
 /* ------------------------------------------------------------- json sources */
 
 /* ------------------------------------------------------------ geojson */
@@ -855,6 +936,17 @@ function genHatch(mode) {
 function build() {
   NOTE = "";
   const kind = $("src").value;
+  if (kind === "pdf") {
+    if (!PDFDOC) return [];
+    // Same two passes as svg below, and for the same reason: the tolerance is
+    // in finished millimetres, which is not known until the fit scale is.
+    const rough = parsePdf(PDFDOC, 0.25, 1);
+    if (!rough.length) {
+      NOTE = "no vector geometry on page one, a scanned pdf holds none";
+      return [];
+    }
+    return parsePdf(PDFDOC, +$("tol").value, fitScale(rough));
+  }
   if (kind === "json") return parseJson($("jsonText").value);
   if (kind === "img") {
     if (!IMG) return [];
@@ -922,10 +1014,15 @@ const lengthOf = p => {
 
 function syncPanels() {
   const k = $("src").value;
+  $("panGeom").classList.toggle("hide", k !== "svg" && k !== "pdf");
   $("panSvg").classList.toggle("hide", k !== "svg");
+  $("panPdf").classList.toggle("hide", k !== "pdf");
   $("panJson").classList.toggle("hide", k !== "json");
   $("panImg").classList.toggle("hide", k !== "img");
-  $("file").accept = k === "img" ? "image/*" : k === "json" ? ".json,application/json" : ".svg,image/svg+xml";
+  $("file").accept = k === "img" ? "image/*"
+    : k === "json" ? ".json,application/json"
+    : k === "pdf" ? ".pdf,application/pdf"
+    : ".svg,image/svg+xml";
 }
 
 /* ---------------------------------------------------------------- simplify */
@@ -1058,7 +1155,10 @@ function render() {
   // Drop under is in paper millimetres, so it is applied to the source paths
   // through the fit scale and the fit is taken afterwards. Filtering after the
   // fit instead would leave the crumbs still setting the bounding box.
-  if (minl > 0 && $("src").value === "svg") {
+  // svg and pdf both arrive here in source units, so the same filter serves
+  // both. The generated sources are already in paper millimetres, and their
+  // short paths are deliberate rather than crumbs off a trace.
+  if (minl > 0 && ["svg", "pdf"].includes($("src").value)) {
     const s = fitScale(paths);
     const keep = paths.filter(p => lengthOf(p) * s >= minl);
     if (keep.length) paths = keep;
@@ -1385,6 +1485,22 @@ async function fileChosen(e) {
       IMG = await loadImage(url);
       URL.revokeObjectURL(url);
       setStatus("done", `loaded ${f.name}, ${IMG.w} x ${IMG.h} working pixels`);
+    } else if (kind === "pdf") {
+      // The only source that leaves the browser. Reading a pdf takes a real
+      // pdf library, and the pi already has one.
+      setStatus("working", `reading ${f.name} on the plotter...`);
+      PDFDOC = null;
+      const r = await fetch("/api/import/pdf", {
+        method: "POST",
+        headers: { "Content-Type": "application/pdf" },
+        body: await f.arrayBuffer(),
+      });
+      const doc = await r.json().catch(() => null);
+      if (!r.ok) throw new Error((doc && doc.error) || ("status " + r.status));
+      PDFDOC = doc;
+      const more = doc.pages > 1 ? `, page 1 of ${doc.pages}` : "";
+      setStatus("done", `loaded ${f.name}, ${doc.paths.length} paths, ` +
+                        `${doc.items} curves and lines${more}`);
     } else {
       const text = await f.text();
       if (kind === "svg") {

@@ -29,7 +29,7 @@ import machines  # noqa: E402  which machines exist, and how to find them
 from pen_box import MODELS  # noqa: E402  the AxiDraw travel envelopes
 from portlock import hold  # noqa: E402  one thing at a time on a port
 
-VERSION = "0.8.0"
+VERSION = "0.9.0"
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DOCS = os.path.join(HERE, "docs")
@@ -674,6 +674,93 @@ def estimate(paths, speed):
     travel += math.dist(at, (0.0, 0.0))            # and home again
     return (ink / (2.18 * max(1, speed)) + travel / (2.18 * 75)
             + len(paths) * LIFT_S), ink, travel
+
+
+# A pdf big enough to exceed this is not a drawing, it is a scan, and the
+# geometry we want is not in it.
+PDF_MAX_BYTES = 32 * 1024 * 1024
+
+
+def pdf_items(page):
+    """One page's vector geometry, curves still curved.
+
+    Deliberately does not flatten. The import page already turns svg curves
+    into points with an adaptive subdivision the tolerance slider drives, and
+    a second flattener here would be a second thing to keep in step with it
+    for as long as both exist. So the control points go back untouched and
+    the browser does the same maths to a pdf that it does to an svg.
+
+    Outlines only: every drawing contributes its path whether the pdf meant
+    to fill it or stroke it, which is what the svg importer already does when
+    it walks the shapes and ignores fill. A pen has no other option.
+    """
+    out = []
+    for d in page.get_drawings():
+        items = []
+        for it in d["items"]:
+            kind = it[0]
+            if kind == "l":
+                items.append(["l", [it[1].x, it[1].y], [it[2].x, it[2].y]])
+            elif kind == "c":
+                items.append(["c"] + [[p.x, p.y] for p in it[1:5]])
+            elif kind == "re":
+                r = it[1]
+                items.append(["re", [r.x0, r.y0, r.x1, r.y1]])
+            elif kind == "qu":
+                q = it[1]
+                items.append(["qu"] + [[p.x, p.y]
+                                       for p in (q.ul, q.ur, q.lr, q.ll)])
+            # Anything else is not geometry a pen can follow.
+        if items:
+            out.append({"items": items, "closed": bool(d.get("closePath"))})
+    return out
+
+
+@app.post("/api/import/pdf")
+def import_pdf():
+    """Raw pdf bytes in, vector geometry out, in pdf points.
+
+    Extraction is here rather than in the browser because pdf.js would mean
+    maintaining a whole second geometry parser next to the svg one. Nothing
+    else about the import pipeline changes: what this returns is fed through
+    the same flatten, fit, tolerance and envelope checks as everything else.
+
+    First page only. A multi-page pdf of a drawing is a document, and picking
+    a page is a decision the page has nowhere to ask about yet.
+    """
+    try:
+        import pymupdf                     # not `fitz`: deprecated since 1.24
+    except ImportError:
+        return jsonify({"error": "pymupdf is not installed on this pi, "
+                                 "`~/venv/bin/pip install pymupdf`"}), 501
+    data = request.get_data(cache=False)
+    if not data:
+        return jsonify({"error": "no pdf in the request body"}), 400
+    if len(data) > PDF_MAX_BYTES:
+        return jsonify({"error": f"pdf is {len(data) // 1024 // 1024} MB, over "
+                                 f"the {PDF_MAX_BYTES // 1024 // 1024} MB "
+                                 f"limit"}), 413
+    try:
+        doc = pymupdf.open(stream=data, filetype="pdf")
+    except Exception as e:
+        return jsonify({"error": f"that is not a pdf we can read: {e}"}), 400
+    try:
+        if doc.page_count < 1:
+            return jsonify({"error": "the pdf has no pages"}), 400
+        page = doc[0]
+        paths = pdf_items(page)
+        r = page.rect
+        return jsonify({
+            "pages": doc.page_count,
+            # Pdf points, 72 to the inch, y down the page, which is the frame
+            # the import page already thinks in.
+            "width": r.width,
+            "height": r.height,
+            "paths": paths,
+            "items": sum(len(p["items"]) for p in paths),
+        })
+    finally:
+        doc.close()
 
 
 @app.post("/api/check")
