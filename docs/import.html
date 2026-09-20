@@ -228,6 +228,15 @@
       <input type="checkbox" id="prev" checked style="justify-self:start"><output></output></div>
     <div class="row"><label for="sortp">sort paths</label>
       <input type="checkbox" id="sortp" checked style="justify-self:start"><output></output></div>
+    <div class="row"><label for="chain">chain ends</label>
+      <input type="checkbox" id="chain" checked style="justify-self:start"><output></output></div>
+    <div class="note">Chain ends joins strokes that already finish where the
+      next one starts, within <b>0.05 mm</b>, so the pen lifts once instead of
+      twice. No ink changes: a stroke drawn backwards leaves the same mark.
+      Sorting cuts the travel between strokes, this cuts the number of them,
+      and a lift is paid per stroke however short it is. On a drawing exported
+      as thousands of separate segments it is the difference between a plot
+      that finishes and one that does not.</div>
     <div class="row"><label for="join">join paths</label>
       <input type="checkbox" id="join" style="justify-self:start"><output></output></div>
     <div class="note">Join paths concatenates everything into the single
@@ -1061,6 +1070,76 @@ function rdp(pts, eps) {
 
 /* -------------------------------------------------------------- path order */
 
+// Merge tolerance in paper millimetres. Two ends this close are the same
+// corner as far as any pen is concerned: the join it draws is shorter than
+// the narrowest nib on the shelf. Matches merge_paths() in plotter.py.
+const JOIN_TOL = 0.05;
+
+function mergePaths(paths, tol) {
+  // Chain strokes that meet end to end, so the pen lifts once instead of
+  // twice. The ink does not change: a stroke drawn backwards leaves the same
+  // mark, and a gap under tol is narrower than the line is wide.
+  //
+  // Sorting cuts the travel between strokes but not the number of them, and a
+  // lift is paid per stroke however short it is. On an A0 architectural plan
+  // that is the whole job: it imports as 128,757 separate strokes, about 18
+  // hours of lifting before any ink, and chains down to 18,552.
+  //
+  // Stroke ends go in a grid, like sortPaths below and for the same reason.
+  // Scanning the remaining strokes for each join is 16 billion comparisons at
+  // that size, which is why the python one could never have been pointed at
+  // a drawing this big.
+  const live = paths.filter(p => p && p.length >= 2);
+  const n = live.length;
+  if (n < 2) return live;           // two paths can still chain into one
+  const cell = Math.max(tol * 2, 1e-6);
+  const grid = new Map();
+  const key = (x, y) => Math.floor(x / cell) + "," + Math.floor(y / cell);
+  const add = (q, i, w) => {
+    const k = key(q[0], q[1]);
+    const a = grid.get(k);
+    if (a) a.push(i, w); else grid.set(k, [i, w]);
+  };
+  for (let i = 0; i < n; i++) {
+    add(live[i][0], i, 0);
+    add(live[i][live[i].length - 1], i, 1);
+  }
+  const used = new Uint8Array(n);
+  const find = pt => {
+    const ci = Math.floor(pt[0] / cell), cj = Math.floor(pt[1] / cell);
+    for (let di = -1; di <= 1; di++) for (let dj = -1; dj <= 1; dj++) {
+      const a = grid.get((ci + di) + "," + (cj + dj));
+      if (!a) continue;
+      for (let k = 0; k < a.length; k += 2) {
+        const i = a[k];
+        if (used[i]) continue;
+        const p = live[i];
+        const q = a[k + 1] === 0 ? p[0] : p[p.length - 1];
+        if (Math.abs(q[0] - pt[0]) <= tol && Math.abs(q[1] - pt[1]) <= tol)
+          return [i, a[k + 1]];
+      }
+    }
+    return null;
+  };
+  const out = [];
+  for (let s = 0; s < n; s++) {
+    if (used[s]) continue;
+    used[s] = 1;
+    const cur = live[s].slice();
+    for (;;) {
+      const hit = find(cur[cur.length - 1]);
+      if (!hit) break;
+      used[hit[0]] = 1;
+      const p = live[hit[0]];
+      // Reversed if it is the far end that meets here.
+      if (hit[1] === 0) for (let k = 1; k < p.length; k++) cur.push(p[k]);
+      else for (let k = p.length - 2; k >= 0; k--) cur.push(p[k]);
+    }
+    out.push(cur);
+  }
+  return out;
+}
+
 function travelOf(paths) {
   // Pen-up distance between strokes, measured the same way the stats line
   // measures it, so "was" and "now" are the same kind of number.
@@ -1185,6 +1264,15 @@ function render() {
     }
     return Math.max(x1 - x0, y1 - y0) < 2 * nib;
   }).length;
+  // Chain before sorting: merging decides which strokes exist, sorting decides
+  // what order to visit them in, and there is no point ordering strokes that
+  // are about to be absorbed into their neighbours.
+  fit.pathsBefore = null;
+  if ($("chain").checked && fit.paths.length > 2) {
+    const before = fit.paths.length;
+    fit.paths = mergePaths(fit.paths, JOIN_TOL);
+    if (fit.paths.length < before) fit.pathsBefore = before;
+  }
   fit.travelBefore = null;
   if ($("sortp").checked && fit.paths.length > 2) {
     fit.travelBefore = travelOf(fit.paths);
@@ -1272,6 +1360,15 @@ function stats(fit) {
     ? `travel between paths <b>${Math.round(travel)}</b> mm` +
       (was ? `, was <b>${Math.round(was)}</b> mm before sorting` : "")
     : "";
+  // Chaining is worth stating in the time it saves, because that is the unit
+  // the decision is made in. Half a second a lift, same figure as the estimate.
+  if (fit.pathsBefore) {
+    const saved = (fit.pathsBefore - fit.paths.length) * 0.5;
+    const h = saved > 3600 ? `${(saved/3600).toFixed(1)} h`
+            : saved > 90 ? `${Math.round(saved/60)} min` : `${Math.round(saved)} s`;
+    $("travel").innerHTML += `<br>chained <b>${fit.pathsBefore}</b> strokes into ` +
+      `<b>${fit.paths.length}</b>, saving about <b>${h}</b> of pen lifting`;
+  }
   if (fit.tiny)
     $("travel").innerHTML += `<br><b style="color:#A32D2D">${fit.tiny}</b> strokes are ` +
       `smaller than two nib widths and will print as blobs`;
@@ -1576,6 +1673,7 @@ async function fileChosen(e) {
   $("file").addEventListener("change", fileChosen);
   $("roads").addEventListener("change", render);
   $("sortp").addEventListener("change", render);
+  $("chain").addEventListener("change", render);
   $("nib").addEventListener("input", render);
   $("simp").addEventListener("input", render);
   $("ptsize").addEventListener("input", render);

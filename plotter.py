@@ -30,26 +30,49 @@ def merge_paths(paths, tol: float = 0.05) -> list:
     start, or whose end reversed, lands within tol of the current end. tol is
     mm and should be smaller than a gap anyone would see. Reversing is safe
     because a stroke drawn backwards leaves the same mark.
+
+    The ends live in a grid rather than being scanned for. This was written
+    against seven segment digits, where scanning a list of tens of paths costs
+    nothing, and then pointed at an imported A0 plan of 128,757 strokes, where
+    scanning is around sixteen billion comparisons and simply never returns.
+    Same greedy rule, same output, one pass.
     """
-    remaining = [list(p) for p in paths if p and len(p) >= 2]
+    live = [list(p) for p in paths if p and len(p) >= 2]
+    n = len(live)
+    if n < 2:                       # two paths can still chain into one
+        return live
+    cell = max(tol * 2, 1e-9)
+    ends: dict = {}
+    for i, p in enumerate(live):
+        for w, q in ((0, p[0]), (1, p[-1])):
+            ends.setdefault((int(q[0] // cell), int(q[1] // cell)), []).append((i, w))
+    used = bytearray(n)
+
+    def find(pt):
+        ci, cj = int(pt[0] // cell), int(pt[1] // cell)
+        for di in (-1, 0, 1):
+            for dj in (-1, 0, 1):
+                for i, w in ends.get((ci + di, cj + dj), ()):
+                    if used[i]:
+                        continue
+                    q = live[i][0] if w == 0 else live[i][-1]
+                    if abs(q[0] - pt[0]) <= tol and abs(q[1] - pt[1]) <= tol:
+                        return i, w
+        return None
+
     out = []
-    while remaining:
-        cur = remaining.pop(0)
-        joined = True
-        while joined:
-            joined = False
-            ex, ey = cur[-1]
-            for i, p in enumerate(remaining):
-                sx, sy = p[0]
-                if abs(sx - ex) <= tol and abs(sy - ey) <= tol:
-                    cur.extend(p[1:])
-                elif abs(p[-1][0] - ex) <= tol and abs(p[-1][1] - ey) <= tol:
-                    cur.extend(list(reversed(p))[1:])
-                else:
-                    continue
-                remaining.pop(i)
-                joined = True
+    for s in range(n):
+        if used[s]:
+            continue
+        used[s] = 1
+        cur = live[s]
+        while True:
+            hit = find(cur[-1])
+            if hit is None:
                 break
+            i, w = hit
+            used[i] = 1
+            cur.extend(live[i][1:] if w == 0 else list(reversed(live[i]))[1:])
         out.append(cur)
     return out
 
