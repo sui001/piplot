@@ -29,7 +29,7 @@ import machines  # noqa: E402  which machines exist, and how to find them
 from pen_box import MODELS  # noqa: E402  the AxiDraw travel envelopes
 from portlock import hold  # noqa: E402  one thing at a time on a port
 
-VERSION = "0.9.0"
+VERSION = "0.9.1"
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DOCS = os.path.join(HERE, "docs")
@@ -693,23 +693,44 @@ def pdf_items(page):
     Outlines only: every drawing contributes its path whether the pdf meant
     to fill it or stroke it, which is what the svg importer already does when
     it walks the shapes and ignores fill. A pen has no other option.
+
+    Two things the geometry has to be put through on the way out:
+
+    Rotation. get_drawings() reports points in the page's UNROTATED space,
+    while page.rect reports the rotated size a viewer shows. On a /Rotate 270
+    A0 plan that is a drawing turned on its side, and nothing downstream can
+    tell, because a sideways plan still fits the paper and still plots. So the
+    page's own rotation matrix is applied here and everything leaves in one
+    frame, the one you see when you open the file.
+
+    Rounding. Two decimals of a pdf point is 0.0035 mm, an order of magnitude
+    under anything these machines can hold, and it takes about a third off the
+    reply. A big plan is 500,000 numbers and they all cross a wifi link.
     """
+    m = page.rotation_matrix                  # identity when /Rotate is 0
+
+    def pt(p):
+        q = p * m
+        return [round(q.x, 2), round(q.y, 2)]
+
     out = []
     for d in page.get_drawings():
         items = []
         for it in d["items"]:
             kind = it[0]
             if kind == "l":
-                items.append(["l", [it[1].x, it[1].y], [it[2].x, it[2].y]])
+                items.append(["l", pt(it[1]), pt(it[2])])
             elif kind == "c":
-                items.append(["c"] + [[p.x, p.y] for p in it[1:5]])
+                items.append(["c"] + [pt(p) for p in it[1:5]])
             elif kind == "re":
-                r = it[1]
-                items.append(["re", [r.x0, r.y0, r.x1, r.y1]])
+                # Rotating by a multiple of 90 leaves a rect axis aligned, but
+                # can swap which corner is which, so it is put back in order.
+                a, b = pt(it[1].tl), pt(it[1].br)
+                items.append(["re", [min(a[0], b[0]), min(a[1], b[1]),
+                                     max(a[0], b[0]), max(a[1], b[1])]])
             elif kind == "qu":
                 q = it[1]
-                items.append(["qu"] + [[p.x, p.y]
-                                       for p in (q.ul, q.ur, q.lr, q.ll)])
+                items.append(["qu"] + [pt(p) for p in (q.ul, q.ur, q.lr, q.ll)])
             # Anything else is not geometry a pen can follow.
         if items:
             out.append({"items": items, "closed": bool(d.get("closePath"))})

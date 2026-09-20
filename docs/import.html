@@ -275,6 +275,11 @@ let CUR = null;      // the same fitted to paper, plus the numbers about it
 let SVGTEXT = "";    // kept so the tolerance slider can reparse without the file
 let PDFDOC = null;   // the pi's reply, kept for the same reason: moving the
                      // tolerance slider must not re-upload the pdf
+// Something slow and local is happening, so the board poller must keep its
+// hands off the status line. Without this the poller overwrites the message
+// within a couple of seconds and a job that is working looks like one that
+// silently did nothing, which is exactly how a 40 second pdf read read.
+let WORKING = false;
 let IMG = null;      // { w, h, data } luminance grid, 0 dark to 1 light
 let NOTE = "";       // anything the generator wants to admit to
 
@@ -1395,7 +1400,13 @@ async function poll() {
   const pct = d.total ? Math.round(100 * d.done / d.total) : 0;
   const left = d.remaining_s ? `, about ${Math.round(d.remaining_s / 60)} min left` : "";
   const who = d.board ? `${d.board}: ` : "";
-  setStatus(d.state, d.state === "running"
+  // Whatever this machine is doing, it does not get to overwrite a local job
+  // that is still running, nor an error the poll did not cause. The board
+  // list beside it still updates either way. An error used to survive about
+  // two seconds, which is not long enough to read one. render() clears it on
+  // the next successful build.
+  if (!WORKING && $("status").className !== "error")
+    setStatus(d.state, d.state === "running"
     ? `${who}${d.message}, ${pct}%${left}` : who + d.message);
   $("others").textContent = (d.others || []).map(o =>
     `${o.board}: ${o.state}${o.state === "running" ? ` ${o.pct}%` : ""}` +
@@ -1488,19 +1499,41 @@ async function fileChosen(e) {
     } else if (kind === "pdf") {
       // The only source that leaves the browser. Reading a pdf takes a real
       // pdf library, and the pi already has one.
-      setStatus("working", `reading ${f.name} on the plotter...`);
+      //
+      // It is also the only source that can take the best part of a minute:
+      // an A0 plan is half a million line segments and the reply runs to tens
+      // of megabytes. So it says so, and it counts, because a page that sits
+      // there saying nothing is indistinguishable from a page that has failed.
       PDFDOC = null;
-      const r = await fetch("/api/import/pdf", {
-        method: "POST",
-        headers: { "Content-Type": "application/pdf" },
-        body: await f.arrayBuffer(),
-      });
-      const doc = await r.json().catch(() => null);
-      if (!r.ok) throw new Error((doc && doc.error) || ("status " + r.status));
-      PDFDOC = doc;
-      const more = doc.pages > 1 ? `, page 1 of ${doc.pages}` : "";
-      setStatus("done", `loaded ${f.name}, ${doc.paths.length} paths, ` +
-                        `${doc.items} curves and lines${more}`);
+      const t0 = Date.now();
+      WORKING = true;
+      const secs = () => ((Date.now() - t0) / 1000).toFixed(0);
+      const tick = setInterval(() => setStatus("working",
+        `reading ${f.name} on the plotter, ${secs()} s. ` +
+        `A large plan holds hundreds of thousands of lines and can take a minute.`), 250);
+      try {
+        const r = await fetch("/api/import/pdf", {
+          method: "POST",
+          headers: { "Content-Type": "application/pdf" },
+          body: await f.arrayBuffer(),
+        });
+        const raw = await r.text();
+        let doc = null;
+        try { doc = JSON.parse(raw); } catch (e) { /* reported below */ }
+        if (!r.ok) throw new Error((doc && doc.error) || ("status " + r.status));
+        if (!doc) throw new Error("the plotter sent back something that is not json");
+        PDFDOC = doc;
+        const more = doc.pages > 1 ? `, page 1 of ${doc.pages}` : "";
+        const mb = (raw.length / 1e6).toFixed(1);
+        clearInterval(tick);
+        WORKING = false;
+        setStatus("done", `loaded ${f.name}, ${doc.paths.length} paths, ` +
+                          `${doc.items} curves and lines${more}, ` +
+                          `${mb} MB in ${secs()} s`);
+      } finally {
+        clearInterval(tick);
+        WORKING = false;
+      }
     } else {
       const text = await f.text();
       if (kind === "svg") {
