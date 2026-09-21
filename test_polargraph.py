@@ -228,6 +228,12 @@ def main() -> int:
         require(pins <= set(range(0, 40)),
                 f"every pin exists on a classic ESP32 "
                 f"({', '.join(map(str, sorted(pins)))})")
+        dis = re.search(r"^\s*shared_stepper_disable_pin:\s*(\S+)", text, re.M)
+        require(dis is not None and dis.group(1).endswith(":high"),
+                "the shared disable pin is :high. It drives the TMC2209's EN "
+                "directly, which is active LOW, so DISABLE is the high level. "
+                ":low reads as the same idea and switches the drivers off "
+                "whenever FluidNC means to run them")
 
     print()
     if FAILS:

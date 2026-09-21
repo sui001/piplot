@@ -101,8 +101,23 @@ kinematics:
     segment_length: 10.000
 
 axes:
-  # Active low, wired to both drivers. One pin, two motors.
-  shared_stepper_disable_pin: gpio.13:low
+  # One pin to both drivers' EN. It is a DISABLE pin, and the attribute says
+  # which electrical level means "disabled".
+  #
+  # The TMC2209's EN is active low: LOW = running, HIGH = off. So the
+  # disable pin is active HIGH, which is :high. This was :low until 21 Sep,
+  # written by confusing "EN is active low" with "the disable pin is active
+  # low". They are opposites: FluidNC writes disable=true to this pin, and
+  # :low would turn that into an electrical low, which RUNS the driver.
+  #
+  # What was actually observed, kept honest: the move test that did nothing
+  # also had the 12 V unplugged, so it is no evidence against :low. What IS
+  # verified, 21 Sep on the bench: with :high the motor moved smoothly up 20
+  # mm and back and then held locked. FluidNC's own configs disagree with
+  # each other here (midtbot :high, 3axis_v4 :low) because it depends on
+  # whether a board has an inverter in between. Wired straight to the
+  # driver, as here, it is :high, same as their official WallPlotter.yaml.
+  shared_stepper_disable_pin: gpio.13:high
 
   # ---- x: the LEFT cord's length, not a cartesian axis -------------------
   # 80 steps/mm is GT2 on a 20 TOOTH pulley (40 mm/rev) at 1/16
