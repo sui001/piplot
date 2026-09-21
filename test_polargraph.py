@@ -199,8 +199,16 @@ def main() -> int:
         require("soft_limits: false" in text and "must_home: false" in text,
                 "config admits it cannot home and has no soft limits, so the "
                 "Pi side check() is known to be the only guard")
-        require("gpio.3" not in text,
-                "config uses no gpio.3, which is an ESP32-S3 strapping pin")
+        used = re.findall(r"^[^#\n]*gpio\.(\d+)", text, re.M)
+        require("2" not in used and "3" not in used,
+                "config drives neither gpio.2, the pin that misbehaves on the "
+                "SuperMini specifically, nor gpio.3, an S3 strapping pin")
+        require(len(used) == 6,
+                f"exactly six pins are driven, found {len(used)}. This is "
+                "here because an earlier regex crossed line breaks, saw four "
+                "of the six, and passed the duplicate check anyway")
+        require(len(used) == len(set(used)),
+                f"no pin is assigned twice (used: {', '.join(used)})")
         pins = set(re.findall(r"gpio\.(\d+)", text))
         require(all(1 <= int(g) <= 13 for g in pins),
                 f"every pin used ({', '.join(sorted(pins, key=int))}) is on "

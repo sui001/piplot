@@ -102,7 +102,7 @@ kinematics:
 
 axes:
   # Active low, wired to both drivers. One pin, two motors.
-  shared_stepper_disable_pin: gpio.5:low
+  shared_stepper_disable_pin: gpio.8:low
 
   # ---- x: the LEFT cord's length, not a cartesian axis -------------------
   # 80 steps/mm is GT2 on a 20 TOOTH pulley (40 mm/rev) at 1/16
@@ -151,8 +151,8 @@ axes:
       hard_limits: false
       pulloff_mm: 1.000
       stepstick:
-        step_pin: gpio.1
-        direction_pin: gpio.2
+        step_pin: gpio.4
+        direction_pin: gpio.5
 
   # ---- y: the RIGHT cord's length ----------------------------------------
   y:
@@ -168,8 +168,8 @@ axes:
       hard_limits: false
       pulloff_mm: 1.000
       stepstick:
-        step_pin: gpio.4
-        direction_pin: gpio.6
+        step_pin: gpio.6
+        direction_pin: gpio.7
 
   # ---- z: the pen servo ---------------------------------------------------
   # Z0 is down, Z5 is up, same shape as suidraw-0 so piplot's Grbl pen logic
@@ -188,23 +188,32 @@ axes:
       limit_all_pin: NO_PIN
       hard_limits: false
       rc_servo:
-        output_pin: gpio.7
+        output_pin: gpio.9
         pwm_hz: 50
         min_pulse_us: 1000
         max_pulse_us: 2000
 
 # No SD card, no SPI, no I2S. The SuperMini breaks out GPIO1 to GPIO13 and
 # nothing above without soldering to the pads, so every pin here is one that
-# is actually on the header. GPIO3 is deliberately skipped: it is an ESP32-S3
-# strapping pin (JTAG source select) and is not worth the risk for the sake
-# of a tidier sequence.
+# is actually on the header.
 #
-#   gpio.1  x step        left cord
-#   gpio.2  x dir
-#   gpio.4  y step        right cord
-#   gpio.6  y dir
-#   gpio.5  shared enable active low, both drivers
-#   gpio.7  pen servo     50 Hz PWM
+# GPIO2 AND GPIO3 ARE BOTH AVOIDED. GPIO2 is the pin that causes real
+# problems on this board specifically, found across several projects, and
+# an earlier version of this file put x dir on it. GPIO3 is an official
+# ESP32-S3 strapping pin; it has been used safely on this board, but with
+# eleven pins to choose from there is no reason to argue about it.
+#
+# The header is a horseshoe (USB at the top): GP1-7 run DOWN the left side,
+# GP8-13 run UP the right side. So the four motor signals are one block of
+# four adjacent pads at the bottom of the left header, and enable and servo
+# are the bottom two on the right.
+#
+#   left row 6   gpio.4  x step        left cord
+#   left row 7   gpio.5  x dir
+#   left row 8   gpio.6  y step        right cord
+#   left row 9   gpio.7  y dir
+#   right row 9  gpio.8  shared enable, active low, both drivers
+#   right row 8  gpio.9  pen servo, 50 Hz PWM
 #
 # Seven of thirteen pins spare. Do NOT power the drivers from the SuperMini's
 # 3V3 regulator; give the motor rail its own supply and share only ground.
