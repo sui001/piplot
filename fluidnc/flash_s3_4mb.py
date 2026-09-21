@@ -47,7 +47,21 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 TABLE = os.path.join(HERE, "partitions-s3-4mb.bin")
 DEFAULT_CONFIG = os.path.join(HERE, "..", "fluidnc-polargraph-bench.yaml")
-APP0_BYTES = 0x300000
+
+# The two boards this has been used on. They differ in chip family, where
+# the bootloader goes, which partition table, and how big the app slot is.
+#
+# wroom: the working path. FluidNC's classic build fits a 4 MB ESP32 as
+#        shipped, so its own partition table is used untouched.
+# s3:    PARKED 21 Sep. Needs our 4 MB table (make_partitions.py), flashes
+#        and verifies, then FluidNC takes over the S3's USB at boot and dies
+#        before its console or WiFi appear. Cause unknown without a TX log.
+BOARDS = {
+    "wroom": {"chip": "esp32", "build": "wifi", "boot": "0x1000",
+              "table": None, "app0": 0x1E0000},
+    "s3":    {"chip": "esp32s3", "build": "wifi_s3", "boot": "0x0000",
+              "table": TABLE, "app0": 0x300000},
+}
 
 
 def esptool(release: str) -> str:
@@ -69,11 +83,12 @@ def run(cmd, dry: bool) -> str:
 
 def cmd_flash(a) -> int:
     rel = a.release
+    b = BOARDS[a.board]
     files = {
-        "0x0000": os.path.join(rel, "wifi_s3", "bootloader.bin"),
-        "0x8000": TABLE,
+        b["boot"]: os.path.join(rel, b["build"], "bootloader.bin"),
+        "0x8000": b["table"] or os.path.join(rel, b["build"], "partitions.bin"),
         "0xe000": os.path.join(rel, "common", "boot_app0.bin"),
-        "0x10000": os.path.join(rel, "wifi_s3", "firmware.bin"),
+        "0x10000": os.path.join(rel, b["build"], "firmware.bin"),
     }
     missing = [p for p in [esptool(rel), *files.values()] if not os.path.exists(p)]
     if missing:
@@ -85,11 +100,11 @@ def cmd_flash(a) -> int:
                   "when every claim holds")
         return 1
     fw = os.path.getsize(files["0x10000"])
-    if fw > APP0_BYTES:
-        print(f"firmware is {fw} bytes, over the {APP0_BYTES} byte app slot")
+    if fw > b["app0"]:
+        print(f"firmware is {fw} bytes, over the {b['app0']} byte app slot")
         return 1
 
-    base = [esptool(rel), "--chip", "esp32s3", "--port", a.port]
+    base = [esptool(rel), "--chip", b["chip"], "--port", a.port]
 
     # Every call but the last uses --after no-reset, so the chip stays in its
     # loader. The S3's USB port belongs to whatever is running: reset it into
@@ -135,6 +150,12 @@ def cmd_flash(a) -> int:
         print("NOT done: the write did not verify. Do not upload a config "
               "onto this; reflash first.")
         return 1
+
+    if a.board == "wroom":
+        # The CH340 is a separate chip, so the port survives the reboot.
+        print(f"\ndone. FluidNC is booting on {a.port}. Next: "
+              f"python flash_s3_4mb.py upload --port {a.port}")
+        return 0
 
     print("\n3. waiting for FluidNC's own USB serial to appear")
     port = wait_for_new_port(timeout=25.0)
@@ -255,6 +276,8 @@ def main() -> int:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = p.add_subparsers(dest="cmd", required=True)
     f = sub.add_parser("flash")
+    f.add_argument("--board", required=True, choices=sorted(BOARDS),
+                   help="wroom is the working path; s3 is parked")
     f.add_argument("--release", required=True)
     f.add_argument("--port", required=True)
     f.add_argument("--no-erase", action="store_true")

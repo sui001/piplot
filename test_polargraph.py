@@ -200,19 +200,34 @@ def main() -> int:
                 "config admits it cannot home and has no soft limits, so the "
                 "Pi side check() is known to be the only guard")
         used = re.findall(r"^[^#\n]*gpio\.(\d+)", text, re.M)
-        require("2" not in used and "3" not in used,
-                "config drives neither gpio.2, the pin that misbehaves on the "
-                "SuperMini specifically, nor gpio.3, an S3 strapping pin")
         require(len(used) == 6,
                 f"exactly six pins are driven, found {len(used)}. This is "
                 "here because an earlier regex crossed line breaks, saw four "
                 "of the six, and passed the duplicate check anyway")
         require(len(used) == len(set(used)),
                 f"no pin is assigned twice (used: {', '.join(used)})")
-        pins = set(re.findall(r"gpio\.(\d+)", text))
-        require(all(1 <= int(g) <= 13 for g in pins),
-                f"every pin used ({', '.join(sorted(pins, key=int))}) is on "
-                "the SuperMini header, not a pad needing solder")
+
+        # The board is a classic ESP32 WROOM devkit (the S3 SuperMini is
+        # parked, see fluidnc/). Its traps, each of which fails differently:
+        board = re.search(r"^board:\s*(.+)$", text, re.M).group(1)
+        require("WROOM" in board,
+                f"config is for the WROOM devkit these pin rules describe "
+                f"(board: {board})")
+        pins = {int(g) for g in used}
+        forbidden = {
+            "a strapping pin (0 2 5 12 15), read at reset; 12 sets the "
+            "flash voltage": {0, 2, 5, 12, 15},
+            "wired to the module's flash chip (6-11)": set(range(6, 12)),
+            "input only (34-39), cannot drive a step pin": set(range(34, 40)),
+            "UART0 (1 3), which is the USB console": {1, 3},
+        }
+        for why, bad in forbidden.items():
+            hit = sorted(pins & bad)
+            require(not hit, f"no pin is {why}"
+                    + (f": {hit}" if hit else ""))
+        require(pins <= set(range(0, 40)),
+                f"every pin exists on a classic ESP32 "
+                f"({', '.join(map(str, sorted(pins)))})")
 
     print()
     if FAILS:
