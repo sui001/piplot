@@ -192,9 +192,10 @@ def main() -> int:
                 f"{cap:.1f} mm that holds the bow to 0.1 mm")
 
         spm = key("steps_per_mm")
-        require(spm == 80.0,
-                "config steps_per_mm is 80, ie GT2 on a 20 tooth pulley at "
-                "1/16 microstepping")
+        require(spm == 32.0,
+                "config steps_per_mm is 32, ie GT2 on a 50 tooth pulley "
+                "(100 mm/rev) at 1/16 microstepping. This is the one number "
+                "that silently scales the whole drawing")
         require("soft_limits: false" in text and "must_home: false" in text,
                 "config admits it cannot home and has no soft limits, so the "
                 "Pi side check() is known to be the only guard")

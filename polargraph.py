@@ -378,7 +378,7 @@ def fluidnc_frame(m: Polargraph, home: Point | None = None) -> dict:
     }
 
 
-def belt_length_mm(m: Polargraph, pulley_teeth: int = 20, pitch: float = 2.0,
+def belt_length_mm(m: Polargraph, pulley_teeth: int = 50, pitch: float = 2.0,
                    clamp: float = 60.0, tail_min: float = 250.0,
                    grid_n: int = 41) -> dict:
     """How much belt one side needs, and how much tail hangs below the motor.
