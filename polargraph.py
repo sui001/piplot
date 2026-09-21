@@ -376,3 +376,40 @@ def fluidnc_frame(m: Polargraph, home: Point | None = None) -> dict:
         "y_max": home[1],
         "home_paper": home,
     }
+
+
+def belt_length_mm(m: Polargraph, pulley_teeth: int = 20, pitch: float = 2.0,
+                   clamp: float = 60.0, tail_min: float = 250.0,
+                   grid_n: int = 41) -> dict:
+    """How much belt one side needs, and how much tail hangs below the motor.
+
+    A toothed belt polargraph has no spool. One end is clamped to the gondola,
+    the belt runs up and over the pulley, and the rest hangs down the back as
+    a tail with a small weight on it. Belt transfers from tail to gondola as
+    the gondola descends, so the total length never changes.
+
+    That means the length is set by the LONGEST cord plus the shortest tail
+    you will tolerate, and nothing else. It is NOT the longest cord plus the
+    travel range: an earlier version of this calculation added the range on
+    top and overstated the requirement by seventy percent, which is the
+    difference between having enough printer spares and not.
+
+    `tail_min` is how much tail must still be hanging when the gondola is at
+    its furthest, so the weight never gets drawn up into the pulley.
+    """
+    tw, th = m.travel
+    pts = [(tw * i / (grid_n - 1), th * j / (grid_n - 1))
+           for i in range(grid_n) for j in range(grid_n)]
+    cords = [m.inverse(*p) for p in pts]
+    longest = max(max(c) for c in cords)
+    shortest = min(min(c) for c in cords)
+    wrap = math.pi * (pulley_teeth * pitch) / (2.0 * math.pi)   # half the pitch circle
+    per_side = longest + wrap + clamp + tail_min
+    return {
+        "per_side": per_side,
+        "total": 2.0 * per_side,
+        "longest_cord": longest,
+        "shortest_cord": shortest,
+        "tail_at_furthest": tail_min,
+        "tail_at_closest": per_side - shortest - wrap - clamp,
+    }

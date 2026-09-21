@@ -15,8 +15,8 @@ import os
 import re
 import sys
 
-from polargraph import (Polargraph, fluidnc_frame, max_segment_length,
-                        stairwell, whiteboard)
+from polargraph import (Polargraph, belt_length_mm, fluidnc_frame,
+                        max_segment_length, stairwell, whiteboard)
 
 YAML = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                     "fluidnc-polargraph-bench.yaml")
@@ -150,6 +150,24 @@ def main() -> int:
         require(hit is refuses,
                 f"at a {drop:.0f} mm drop a 1600 mm span "
                 f"{'does' if refuses else 'does not'} refuse a corner")
+
+    print(NL + "belt, which is the one part that might not be in a drawer")
+    b = belt_length_mm(bench)
+    note(f"bench: {b['per_side'] / 1000:.2f} m per side, "
+         f"{b['total'] / 1000:.2f} m total, longest cord "
+         f"{b['longest_cord'] / 1000:.2f} m")
+    note(f"bench: tail hangs {b['tail_at_closest'] / 1000:.2f} m at the "
+         f"gondola's closest point, so leave that under each motor")
+    require(b["per_side"] > b["longest_cord"],
+            "belt per side exceeds the longest cord, or the gondola cannot "
+            "reach the far corner at all")
+    require(b["per_side"] < b["longest_cord"] + b["shortest_cord"],
+            "belt per side is NOT longest cord plus travel range. An earlier "
+            "version added the range on top and overstated it by 70%, which "
+            "is the difference between having enough spares and not")
+    require(b["tail_at_closest"] < 2000.0,
+            "the tail never hangs more than 2 m, which is the clear wall "
+            "under the motors")
 
     print(NL + "the FluidNC config says the same thing this module does")
     if not os.path.exists(YAML):

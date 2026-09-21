@@ -46,8 +46,16 @@ meta: gen3d / Cybernetic Garden. Generated against polargraph.whiteboard().
 # costs nothing.
 #
 # Wall needed: 1.14 m wide, and 2.0 m from the anchors down to the bottom of
-# the usable area. Belt: about 4.2 m per side, 8.4 m total, which includes
-# the tail that has to pay out as the gondola crosses the board.
+# the usable area.
+#
+# Belt: 2.54 m per side, 5.08 m total, from polargraph.belt_length_mm().
+# That is the longest cord (2.21 m) plus half a pulley wrap, a clamp
+# allowance, and 250 mm of tail still hanging when the gondola is furthest
+# away. It is NOT the longest cord plus the travel range: the belt total
+# never changes, it just transfers from the tail to the gondola side.
+#
+# Leave 2 m of clearance under each motor. At the gondola's CLOSEST point the
+# tail is at its longest, 1.96 m, and it has to hang somewhere.
 # ---------------------------------------------------------------------------
 
 stepping:
