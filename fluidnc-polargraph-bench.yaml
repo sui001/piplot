@@ -48,8 +48,8 @@ meta: gen3d / Cybernetic Garden. Generated against polargraph.whiteboard().
 # Wall needed: 1.14 m wide, and 2.0 m from the anchors down to the bottom of
 # the usable area.
 #
-# Belt: 2.57 m per side, 5.14 m total, from polargraph.belt_length_mm().
-# That is the longest cord (2.21 m), plus 50 mm of wrap over the 50T pulley,
+# Belt: 2.54 m per side, 5.08 m total, from polargraph.belt_length_mm().
+# That is the longest cord (2.21 m), plus 20 mm of wrap over the 20T pulley,
 # plus a clamp allowance, plus 250 mm of tail still hanging when the gondola
 # is at its furthest. It is NOT the longest cord plus the travel range: the
 # belt total never changes, it just transfers from the tail side to the
@@ -57,6 +57,21 @@ meta: gen3d / Cybernetic Garden. Generated against polargraph.whiteboard().
 #
 # Leave 2 m of clearance under each motor. At the gondola's CLOSEST point the
 # tail is at its longest, 1.96 m, and it has to hang somewhere.
+#
+# BELT SEATING. The mechanical reference for this build is Thingiverse
+# 1733420, "Polargraph - timing belt and spring load" by hinge (CC BY-NC): a
+# bearing on a short hinged arm with a spring pulling it into the belt, which
+# takes up slack and adds wrap angle in one part. With that fitted, the tail
+# weight stops being a tuning problem and only has to keep the tail hanging
+# straight, so 100-150 g is plenty. Without it, the tail weight is the ONLY
+# thing seating the belt, and it has a hard ceiling: minimum cord tension
+# anywhere on this board is 3.92 N, and a tail heavier than that lifts the
+# gondola and goes slack.
+#
+# A sprung idler is unambiguously right HERE because gravity keeps the
+# gondola side loaded and the belt only ever pulls one way. It is not
+# automatically right on a reversing joint, where the spring reads out as
+# backlash. See genarm docs/handover_elbow.md, which now says so.
 # ---------------------------------------------------------------------------
 
 stepping:
@@ -90,32 +105,41 @@ axes:
   shared_stepper_disable_pin: gpio.5:low
 
   # ---- x: the LEFT cord's length, not a cartesian axis -------------------
-  # 32 steps/mm is GT2 on a 50 TOOTH pulley (100 mm/rev) at 1/16
-  # microstepping: 3200 steps / 100 mm. Printed, 31.8 mm pitch diameter.
+  # 80 steps/mm is GT2 on a 20 TOOTH pulley (40 mm/rev) at 1/16
+  # microstepping: 3200 steps / 40 mm.
   #
   # THIS IS THE ONE NUMBER THAT SILENTLY SCALES THE WHOLE DRAWING. Get the
   # microstep jumpers wrong and everything comes out at half or double size
-  # with no error anywhere. Check it first, on paper, with a tape measure:
-  # draw a 500 mm line, measure it, scale this number by what you get over
-  # what you asked for.
+  # with no error reported anywhere. Check it first, on paper, with a tape
+  # measure: draw a 500 mm line, measure it, scale this number by what you
+  # got over what you asked for.
   #
-  # 50T was chosen because Sui has printed a GT2 pulley that size before and
-  # it ran, and because 3200/100 is exactly 32 rather than a recurring
-  # decimal. It leaves 3x resolution headroom against the 0.1 mm bow
-  # tolerance, costs 13.2 N.cm of torque at peak cord tension (a third of a
-  # NEMA 17), and puts 25 teeth in the wrap, so one bad printed tooth is a
-  # smaller share of what is carrying the belt. Nothing between 16T and 80T
-  # is actually binding here.
+  # This went 20T -> 50T -> 20T over one session, and the reasoning matters
+  # more than the number.
   #
-  # Other clean values if the print does not come out: 40T -> 40 steps/mm,
-  # 64T -> 25 steps/mm, 20T -> 80 steps/mm.
+  # The metric that decides it is the FULL STEP, not the microstep.
+  # Microstepping positions between full steps only as well as the driver's
+  # current ratios hold against friction, and that nonlinearity runs about
+  # +-10% of a full step no matter how finely you subdivide. So:
+  #
+  #   pulley   full step   real floor   torque at 8.3 N peak cord tension
+  #     20T      0.20 mm      +-20 um     5.3 N.cm
+  #     50T      0.50 mm      +-50 um    13.2 N.cm
+  #     80T      0.80 mm      +-80 um    21.1 N.cm  (151% of a pancake NEMA 17)
+  #
+  # 20T wins on both, and is the size every printer spare already is. The
+  # detour to 50T was on the theory that a printed pulley wants coarser
+  # teeth, which is true but was answered better by Thingiverse 1733420
+  # below: a proven polargraph running 20T with a sprung idler.
+  #
+  # If you ever do change pulley: 40T -> 40 steps/mm, 50T -> 32, 80T -> 20.
   #
   # NOTE: WallPlotter runs the left motor backward on purpose
   # (motors[_left_axis] = 0 - (left_length - zero_left)). If the gondola runs
   # away from the left anchor when it should approach it, flip this one
   # motor's dir_pin with :low, not both.
   x:
-    steps_per_mm: 32.000
+    steps_per_mm: 80.000
     max_rate_mm_per_min: 6000.000      # 100 mm/s, plenty for ink
     acceleration_mm_per_sec2: 100.000  # see the pendulum note at the bottom
     max_travel_mm: 2300.000            # longest the left cord ever gets (2.21 m)
@@ -132,7 +156,7 @@ axes:
 
   # ---- y: the RIGHT cord's length ----------------------------------------
   y:
-    steps_per_mm: 32.000
+    steps_per_mm: 80.000
     max_rate_mm_per_min: 6000.000
     acceleration_mm_per_sec2: 100.000
     max_travel_mm: 2300.000
@@ -205,8 +229,8 @@ start:
 #
 # 3. Sag is NOT corrected here and does not need to be on this rig: with an
 #    800 g gondola it is under 0.04 mm anywhere on the board, and peak cord
-#    tension is 8.3 N, which is 13.2 N.cm at the 50 tooth pulley: about a
-#    third of what a NEMA 17 holds. It reaches about
+#    tension is 8.3 N, which is 5.3 N.cm at the 20 tooth pulley: about an
+#    eighth of what a NEMA 17 holds. It reaches about
 #    0.9 mm at full stairwell scale with a 1.5 kg gondola, which is still
 #    below the segment tolerance. polargraph.sag_error_mm() reports it.
 # ---------------------------------------------------------------------------
