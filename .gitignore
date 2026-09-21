@@ -7,3 +7,4 @@ plan.json
 # This Pi's own machines, with its own USB paths and envelopes. Not the repo's
 # business, and a deploy must never overwrite it. See machines.example.json.
 machines.json
+access_password.txt

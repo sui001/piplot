@@ -245,6 +245,9 @@
     </div>
     <div class="bar">
       <button id="bCheck">check on machine</button>
+      <input type="password" id="plotPw" class="hide" placeholder="password to plot"
+        autocomplete="current-password" style="width:170px;padding:8px 10px;font:inherit;
+        border:1px solid var(--ink);border-radius:8px">
       <button id="bPlot" class="primary">plot it</button>
       <button id="bStop" class="danger" disabled>stop</button>
       <button id="bSvg">download svg</button>
@@ -848,15 +851,33 @@ function setStatus(state, msg) {
   $("bPlot").disabled = state === "running";
 }
 
+// A visitor arriving through Funnel needs the password to plot or stop.
+// Everything else on the page is open to them. The password is kept for this
+// tab only, so it is typed once per visit and never written to disk.
+let NEEDS_PW = false;
+
+function savedPw() {
+  try { return sessionStorage.getItem("piplot.pw") || ""; } catch (e) { return ""; }
+}
+
+function sendHeaders() {
+  const h = { "Content-Type": "application/json" };
+  if (NEEDS_PW) h["X-Plot-Password"] = $("plotPw").value || savedPw();
+  return h;
+}
+
 async function post(path) {
   if (!CUR) { setStatus("error", "nothing generated yet"); return null; }
   const body = JSON.stringify(payload());
   const mb = (body.length / 1048576).toFixed(1);
   setStatus("running", `sending ${CUR.pts.length} points (${mb} MB) to the Pi...`);
   try {
-    const r = await fetch(path, { method: "POST",
-      headers: { "Content-Type": "application/json" }, body });
-    return await r.json();
+    const r = await fetch(path, { method: "POST", headers: sendHeaders(), body });
+    const d = await r.json();
+    if (d && d.need_password) $("plotPw").focus();
+    else if (NEEDS_PW && path === "/api/plot" && d && d.ok)
+      try { sessionStorage.setItem("piplot.pw", $("plotPw").value); } catch (e) {}
+    return d;
   } catch (e) {
     setStatus("error", `could not reach the Pi: ${e}`);
     return null;
@@ -886,7 +907,7 @@ async function plot() {
 async function stopPlot() {
   try {
     const r = await fetch("/api/stop", { method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: sendHeaders(),
       body: JSON.stringify({ port: $("board").value }) });
     const d = await r.json();
     if (!d.ok) setStatus("error", d.message);
@@ -1058,6 +1079,11 @@ function showEnvelope() {
   });
   $("bCheck").onclick = check;
   $("bPlot").onclick = plot;
+  NEEDS_PW = !DEMO && !!info.needs_password;
+  if (NEEDS_PW) {
+    $("plotPw").classList.remove("hide");
+    $("plotPw").value = savedPw();
+  }
   $("bStop").onclick = stopPlot;
   $("bSvg").onclick = downloadSvg;
   syncPanels();

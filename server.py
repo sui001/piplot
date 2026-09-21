@@ -20,6 +20,8 @@ import math
 import os
 import subprocess
 import hashlib
+import hmac
+import ipaddress
 import threading
 import time
 
@@ -29,11 +31,93 @@ import machines  # noqa: E402  which machines exist, and how to find them
 from pen_box import MODELS  # noqa: E402  the AxiDraw travel envelopes
 from portlock import hold  # noqa: E402  one thing at a time on a port
 
-VERSION = "0.9.2"
+VERSION = "0.10.0"
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DOCS = os.path.join(HERE, "docs")
 app = Flask(__name__, static_folder=None)
+
+
+# --------------------------------------------------------------- access gate
+#
+# Anyone can look and play: the pages, previews, imports and envelope checks
+# are open. Only the two routes that move a machine, plot and stop, need the
+# password, and only for visitors. Sui's own devices come over the tailnet,
+# which Tailscale has already authenticated, so they go straight through.
+# Everyone else comes via Tailscale Funnel, which proxies the public internet
+# to 127.0.0.1 on this machine. The TCP peer address is what is checked, and a
+# visitor cannot forge it: every Funnel request reaches the server from
+# loopback.
+#
+# The password is not in this repo. It lives in access_password.txt beside
+# this file, or PIPLOT_PASSWORD, and is re-read on every request so it can be
+# set or changed without a restart. No password set means visitors cannot plot
+# at all: a Funnel left open by accident must not mean three machines anyone
+# can drive.
+
+# The only routes that make a machine move.
+ACTIONS = {"/api/plot", "/api/stop"}
+
+# The server faces the internet, and nothing it legitimately takes is anywhere
+# near this. A 57,000 point plot is about 2 MB.
+app.config["MAX_CONTENT_LENGTH"] = 32 * 1024 * 1024
+
+TAILNET = [ipaddress.ip_network("100.64.0.0/10"),
+           ipaddress.ip_network("fd7a:115c:a1e0::/48")]
+PASSWORD_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                             "access_password.txt")
+_failures: list = []          # times of recent wrong passwords
+
+
+def access_password() -> str:
+    env = os.environ.get("PIPLOT_PASSWORD", "").strip()
+    if env:
+        return env
+    try:
+        with open(PASSWORD_FILE, encoding="utf-8") as fh:
+            return fh.read().strip()
+    except OSError:
+        return ""
+
+
+def from_tailnet(addr: str) -> bool:
+    try:
+        ip = ipaddress.ip_address(addr)
+    except ValueError:
+        return False
+    return any(ip in net for net in TAILNET)
+
+
+def needs_password() -> bool:
+    return not from_tailnet(request.remote_addr or "")
+
+
+@app.before_request
+def gate():
+    if request.path not in ACTIONS or not needs_password():
+        return None
+    pw = access_password()
+    if not pw:
+        return jsonify({"ok": False, "need_password": True,
+                        "message": "plotting is locked: no password is set on "
+                                   "this machine"}), 403
+    now = time.time()
+    _failures[:] = [t for t in _failures if now - t < 60]
+    if len(_failures) >= 20:
+        return jsonify({"ok": False, "need_password": True,
+                        "message": "too many wrong passwords, try again in a "
+                                   "minute"}), 429
+    given = request.headers.get("X-Plot-Password", "")
+    if given and hmac.compare_digest(given.encode(), pw.encode()):
+        return None
+    if given:
+        # A wrong guess costs time, so the password cannot be walked through
+        # quickly. A request with no password at all is not counted.
+        _failures.append(now)
+        time.sleep(0.5)
+    return jsonify({"ok": False, "need_password": True,
+                    "message": "wrong password" if given
+                               else "the password is needed to plot or stop"}), 401
 
 
 class Job:
@@ -574,6 +658,9 @@ def info():
                                   "assumed": b["assumed"]}
                      for b in list_boards()},
         "host": os.uname().nodename,
+        # Tells the page to show a password box beside Plot. False on the
+        # tailnet, true for anyone arriving through Funnel.
+        "needs_password": needs_password(),
     })
 
 
@@ -916,10 +1003,21 @@ def main() -> int:
     print("Design curves in a browser, preview them, send them to the AxiDraw")
     print("https://github.com/sui001/piplot")
     print()
-    print(f"serving on http://{host}:{args.port}")
-    if host not in ("0.0.0.0",):
-        print("(bound to the tailnet only, pass --host 0.0.0.0 to open it up)")
-    app.run(host=host, port=args.port, threaded=True)
+
+    # Also listen on loopback, because Tailscale Funnel proxies to 127.0.0.1
+    # and a tailnet-only bind gives the public side a 502. Loopback is where
+    # the password gate applies, so opening it does not open the machines.
+    from werkzeug.serving import make_server
+    hosts = [host] if host in ("127.0.0.1", "0.0.0.0") else [host, "127.0.0.1"]
+    servers = [make_server(h, args.port, app, threaded=True) for h in hosts]
+    for h in hosts:
+        print(f"serving on http://{h}:{args.port}")
+    print("tailnet: open.  visitors via Funnel: can look and design, "
+          + ("password needed to plot or stop" if access_password() else
+             "CANNOT plot, no access password set"))
+    for srv in servers[1:]:
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+    servers[0].serve_forever()
     return 0
 
 
