@@ -1,0 +1,3 @@
+# Unpacked FluidNC releases: GPL binaries, 25 MB, fetched not committed.
+# gh release download v4.1.0 -R bdring/FluidNC -p "fluidnc-v4.1.0-win64.zip"
+release/

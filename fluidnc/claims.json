@@ -1,0 +1,73 @@
+{
+ "ok": true,
+ "claims": [
+  {
+   "ok": true,
+   "claim": "re-encoding the stock 8 MB table gives FluidNC v4.1.0's shipped partitions.bin byte for byte, MD5 and padding included, so every field of the encoder is right"
+  },
+  {
+   "ok": true,
+   "claim": "its MD5 entry verifies, or the bootloader rejects it"
+  },
+  {
+   "ok": true,
+   "claim": "it is exactly 0xC00 bytes, the sector ESP-IDF reads"
+  },
+  {
+   "ok": true,
+   "claim": "it decodes to the four partitions that were encoded"
+  },
+  {
+   "ok": true,
+   "claim": "nvs ends at 0x00E000, inside 0x400000"
+  },
+  {
+   "ok": true,
+   "claim": "otadata ends at 0x010000, inside 0x400000"
+  },
+  {
+   "ok": true,
+   "claim": "app0 ends at 0x310000, inside 0x400000"
+  },
+  {
+   "ok": true,
+   "claim": "spiffs ends at 0x400000, inside 0x400000"
+  },
+  {
+   "ok": true,
+   "claim": "no two partitions overlap"
+  },
+  {
+   "ok": true,
+   "claim": "nothing sits on the bootloader (0x0) or the table (0x8000)"
+  },
+  {
+   "ok": true,
+   "claim": "app0 is 64 KB aligned, which ESP-IDF requires of app partitions"
+  },
+  {
+   "ok": true,
+   "claim": "app0 holds the 2.05 MB firmware with 0.95 MB to spare"
+  },
+  {
+   "ok": true,
+   "claim": "nvs is identical to stock, so the bootloader, boot_app0.bin and the firmware are none the wiser"
+  },
+  {
+   "ok": true,
+   "claim": "otadata is identical to stock, so the bootloader, boot_app0.bin and the firmware are none the wiser"
+  },
+  {
+   "ok": true,
+   "claim": "app0 is identical to stock, so the bootloader, boot_app0.bin and the firmware are none the wiser"
+  },
+  {
+   "ok": true,
+   "claim": "the filesystem keeps label 'spiffs' and subtype 0x82, which is what localfs.cpp mounts by name, with format on failure"
+  },
+  {
+   "ok": true,
+   "claim": "the filesystem uses every byte left: 960 KB, ending exactly at 4 MB"
+  }
+ ]
+}
