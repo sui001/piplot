@@ -1,0 +1,166 @@
+board: ESP32-S3 SuperMini
+name: polargraph bench rig, 1.5 x 1.0 m whiteboard
+meta: gen3d / Cybernetic Garden. Generated against polargraph.whiteboard().
+
+# ---------------------------------------------------------------------------
+# Read this before flashing.
+#
+# This machine CANNOT HOME. FluidNC's WallPlotter kinematics returns false
+# from canHome(), and there is nowhere to put a switch on a hanging gondola
+# anyway. Instead it derives its zero cord lengths from wherever the pen is
+# sitting at power on.
+#
+# So the startup ritual is: park the gondola on the cross marked at the CENTRE
+# of the whiteboard, then power the board. That spot is cartesian (0, 0).
+# Get it wrong and every coordinate is wrong, with nothing reported.
+#
+# Park at the centre rather than a corner because it is the easiest point to
+# measure to with a tape from two edges, and because an error there is shared
+# between both halves of the drawing instead of piling up at one edge.
+#
+# There are NO SOFT LIMITS, because soft limits without homing are a fiction.
+# Nothing on the board will stop a path from winding the gondola up into an
+# anchor. The guard is polargraph.Polargraph.check() on the Pi, exactly as it
+# is for suidraw-0, and it is the only guard there is.
+#
+# Geometry, all from polargraph.whiteboard():
+#   anchors 1700 mm apart, whiteboard 1500 x 1000 mm hung 600 mm below them
+#   park point = board centre, so the board spans x -750..750, y -500..500
+#   anchors relative to the park point: (-850, +1100) and (+850, +1100)
+#
+# The 600 mm drop is not a guess. At a 60 mm drop only 61% of the board
+# clears the 20 degree cord angle floor, and widening the anchors makes that
+# WORSE, not better. Height above the paper is the lever, not width.
+# ---------------------------------------------------------------------------
+
+stepping:
+  engine: RMT
+  idle_ms: 255          # never release the motors: the gondola hangs on them
+  pulse_us: 4
+  dir_delay_us: 1
+  disable_delay_us: 0
+  segments: 12
+
+kinematics:
+  WallPlotter:
+    left_axis: 0
+    left_anchor_x: -850.000
+    left_anchor_y: 1100.000
+    right_axis: 1
+    right_anchor_x: 850.000
+    right_anchor_y: 1100.000
+
+    # A straight line on the paper is NOT a straight line in cord space, and
+    # this is the number that hides the difference. Unsegmented, a 1350 mm
+    # horizontal line across this board bows 121 mm. polargraph's
+    # max_segment_length() says 22.9 mm holds the bow under 0.1 mm here, and
+    # 22.8 mm does the same in the full stairwell, so one value covers both.
+    # 10 mm is FluidNC's own default and is comfortably inside that. Raising
+    # it above 20 is how the drawing starts bowing again.
+    segment_length: 10.000
+
+axes:
+  # Active low, wired to both drivers. One pin, two motors.
+  shared_stepper_disable_pin: gpio.5:low
+
+  # ---- x: the LEFT cord's length, not a cartesian axis -------------------
+  # 80 steps/mm is GT2 on a 20 tooth pulley (40 mm/rev) at 1/16 microstepping:
+  # 3200 steps / 40 mm. Set the microstep jumpers to match, or this is wrong
+  # by a factor of two and looks like a scale error.
+  #
+  # NOTE: WallPlotter runs the left motor backward on purpose
+  # (motors[_left_axis] = 0 - (left_length - zero_left)). If the gondola runs
+  # away from the left anchor when it should approach it, flip this one
+  # motor's dir_pin with :low, not both.
+  x:
+    steps_per_mm: 80.000
+    max_rate_mm_per_min: 6000.000      # 100 mm/s, plenty for ink
+    acceleration_mm_per_sec2: 100.000  # see the pendulum note at the bottom
+    max_travel_mm: 2500.000            # longest the left cord ever gets
+    soft_limits: false
+    motor0:
+      limit_neg_pin: NO_PIN
+      limit_pos_pin: NO_PIN
+      limit_all_pin: NO_PIN
+      hard_limits: false
+      pulloff_mm: 1.000
+      stepstick:
+        step_pin: gpio.1
+        direction_pin: gpio.2
+
+  # ---- y: the RIGHT cord's length ----------------------------------------
+  y:
+    steps_per_mm: 80.000
+    max_rate_mm_per_min: 6000.000
+    acceleration_mm_per_sec2: 100.000
+    max_travel_mm: 2500.000
+    soft_limits: false
+    motor0:
+      limit_neg_pin: NO_PIN
+      limit_pos_pin: NO_PIN
+      limit_all_pin: NO_PIN
+      hard_limits: false
+      pulloff_mm: 1.000
+      stepstick:
+        step_pin: gpio.4
+        direction_pin: gpio.6
+
+  # ---- z: the pen servo ---------------------------------------------------
+  # Z0 is down, Z5 is up, same shape as suidraw-0 so piplot's Grbl pen logic
+  # transfers. max_travel_mm maps the servo's whole sweep onto 0..5 mm, so a
+  # 5 mm Z move is the servo's full travel. Trim with min/max_pulse_us rather
+  # than by changing the Z numbers, or piplot and the board disagree.
+  z:
+    steps_per_mm: 100.000
+    max_rate_mm_per_min: 600.000
+    acceleration_mm_per_sec2: 1000.000
+    max_travel_mm: 5.000
+    soft_limits: false
+    motor0:
+      limit_neg_pin: NO_PIN
+      limit_pos_pin: NO_PIN
+      limit_all_pin: NO_PIN
+      hard_limits: false
+      rc_servo:
+        output_pin: gpio.7
+        pwm_hz: 50
+        min_pulse_us: 1000
+        max_pulse_us: 2000
+
+# No SD card, no SPI, no I2S. The SuperMini breaks out GPIO1 to GPIO13 and
+# nothing above without soldering to the pads, so every pin here is one that
+# is actually on the header. GPIO3 is deliberately skipped: it is an ESP32-S3
+# strapping pin (JTAG source select) and is not worth the risk for the sake
+# of a tidier sequence.
+#
+#   gpio.1  x step        left cord
+#   gpio.2  x dir
+#   gpio.4  y step        right cord
+#   gpio.6  y dir
+#   gpio.5  shared enable active low, both drivers
+#   gpio.7  pen servo     50 Hz PWM
+#
+# Seven of thirteen pins spare. Do NOT power the drivers from the SuperMini's
+# 3V3 regulator; give the motor rail its own supply and share only ground.
+# TMC2209 logic is 3.3 V native, so nothing needs level shifting.
+
+start:
+  must_home: false
+
+# ---------------------------------------------------------------------------
+# Tuning, in the order it will actually matter.
+#
+# 1. acceleration_mm_per_sec2 is the pendulum knob, and it is the one real
+#    problem this machine has. The gondola on 1.7 m cords is a 2.3 second
+#    pendulum with almost nothing damping it, and in the stairwell it will be
+#    6.1 seconds. Every acceleration rings it. 100 is a deliberately timid
+#    starting point. Raise it until the lines start to wobble, then halve it.
+#
+# 2. idle_ms is 255 (never disable) on purpose. Releasing the motors drops
+#    the gondola, and since there is no homing it never finds itself again.
+#
+# 3. Sag is NOT corrected here and does not need to be on this rig: with an
+#    800 g gondola it is under 0.03 mm anywhere on the board. It reaches about
+#    0.9 mm at full stairwell scale with a 1.5 kg gondola, which is still
+#    below the segment tolerance. polargraph.sag_error_mm() reports it.
+# ---------------------------------------------------------------------------

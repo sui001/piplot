@@ -11,9 +11,17 @@ measured the one thing that goes wrong between the transform and the paper.
 from __future__ import annotations
 
 import math
+import os
+import re
 import sys
 
-from polargraph import Polargraph, stairwell, whiteboard
+from polargraph import (Polargraph, fluidnc_frame, max_segment_length,
+                        stairwell, whiteboard)
+
+YAML = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                    "fluidnc-polargraph-bench.yaml")
+
+NL = chr(10)
 
 FAILS: list[str] = []
 NOTES: list[str] = []
@@ -118,6 +126,42 @@ def main() -> int:
     require(frac > 0.5,
             "more than half the whiteboard is usable, or the anchors are in "
             "the wrong place")
+
+    print(NL + "the FluidNC config says the same thing this module does")
+    if not os.path.exists(YAML):
+        require(False, f"{os.path.basename(YAML)} is present")
+    else:
+        text = open(YAML, encoding="utf-8").read()
+
+        def key(name: str):
+            hit = re.search(rf"^\s*{name}:\s*(-?[\d.]+)", text, re.M)
+            return float(hit.group(1)) if hit else None
+
+        want = fluidnc_frame(bench)
+        for k in ("left_anchor_x", "left_anchor_y",
+                  "right_anchor_x", "right_anchor_y"):
+            require(key(k) is not None and abs(key(k) - want[k]) < 1e-6,
+                    f"config {k} is {key(k)}, model says {want[k]}")
+
+        seg = key("segment_length")
+        cap = max_segment_length(bench, 0.1)
+        require(seg is not None and seg <= cap,
+                f"config segment_length {seg} mm is at or under the "
+                f"{cap:.1f} mm that holds the bow to 0.1 mm")
+
+        spm = key("steps_per_mm")
+        require(spm == 80.0,
+                "config steps_per_mm is 80, ie GT2 on a 20 tooth pulley at "
+                "1/16 microstepping")
+        require("soft_limits: false" in text and "must_home: false" in text,
+                "config admits it cannot home and has no soft limits, so the "
+                "Pi side check() is known to be the only guard")
+        require("gpio.3" not in text,
+                "config uses no gpio.3, which is an ESP32-S3 strapping pin")
+        pins = set(re.findall(r"gpio\.(\d+)", text))
+        require(all(1 <= int(g) <= 13 for g in pins),
+                f"every pin used ({', '.join(sorted(pins, key=int))}) is on "
+                "the SuperMini header, not a pad needing solder")
 
     print()
     if FAILS:

@@ -323,3 +323,38 @@ def max_segment_length(m: Polargraph, tol: float = 0.1,
         else:
             hi = mid
     return lo
+
+
+def fluidnc_frame(m: Polargraph, home: Point | None = None) -> dict:
+    """The numbers FluidNC's WallPlotter kinematics wants, from this rig.
+
+    FluidNC does not share piplot's frame and cannot be talked into it:
+
+    - **Its y runs up.** The stock config puts both anchors at y = +100, ie
+      above the origin. piplot's y runs down the page.
+    - **Its origin is wherever the pen is at power on**, because `WallPlotter`
+      derives its zero cord lengths from cartesian (0, 0) in `init()` and
+      `canHome()` returns false. There is no homing on a polargraph, ever.
+
+    So the origin is a spot you park the gondola on by hand. `home` says which
+    paper point that is, defaulting to the middle of the sheet, which is the
+    easiest place to measure to and the most forgiving of a small error, since
+    it puts the mistake in the middle rather than at an edge.
+
+    Returns the four anchor values plus the paper's extents in FluidNC's frame,
+    so a config can be checked against this rather than typed twice.
+    """
+    if home is None:
+        home = (m.travel[0] / 2.0, m.travel[1] / 2.0)
+    hx, hy = m.to_machine(*home)
+    return {
+        "left_anchor_x": 0.0 - hx,
+        "left_anchor_y": hy,                    # machine y is down, FluidNC's is up
+        "right_anchor_x": m.span - hx,
+        "right_anchor_y": hy,
+        "x_min": -home[0],
+        "x_max": m.travel[0] - home[0],
+        "y_min": home[1] - m.travel[1],
+        "y_max": home[1],
+        "home_paper": home,
+    }
