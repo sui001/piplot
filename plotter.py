@@ -573,3 +573,229 @@ class Grbl(Plotter):
         finally:
             self.sp.close()
             self.sp = None
+
+
+class _Socket:
+    """A TCP socket wearing pyserial's clothes.
+
+    FluidNC's telnet server on port 23 speaks the same GRBL protocol as its
+    USB port, byte for byte. So rather than teach `Grbl` about networks, this
+    exposes the handful of members `Grbl` actually touches (`write`, `read`,
+    `readline`, `in_waiting`, `reset_input_buffer`, `close`) and everything
+    above it carries on unchanged.
+
+    The important difference from a serial port is what OPENING one does.
+    Opening the CH340 asserts DTR and resets the board, which is why
+    `machines.py` goes to such lengths to identify boards from udev symlinks
+    without ever opening them. Opening a socket does nothing to the machine.
+    On a polargraph, which cannot home and so can never recover a lost
+    position, that is not a convenience. It is the difference between a
+    machine you can safely ask a question of and one you cannot.
+    """
+
+    def __init__(self, host: str, port: int = 23, timeout: float = 2.0):
+        import socket
+
+        self._sock = socket.create_connection((host, port), timeout=timeout)
+        self._timeout = timeout
+        self._sock.settimeout(timeout)
+        self._buf = bytearray()
+        self.host, self.port = host, port
+
+    def _fill(self, block: bool) -> None:
+        import socket
+
+        try:
+            self._sock.settimeout(self._timeout if block else 0.0)
+            chunk = self._sock.recv(4096)
+            if chunk:
+                self._buf.extend(chunk)
+        except (socket.timeout, BlockingIOError):
+            pass
+
+    @property
+    def in_waiting(self) -> int:
+        self._fill(block=False)
+        return len(self._buf)
+
+    def write(self, data: bytes) -> int:
+        self._sock.sendall(data)
+        return len(data)
+
+    def read(self, n: int = 1) -> bytes:
+        while len(self._buf) < n:
+            before = len(self._buf)
+            self._fill(block=True)
+            if len(self._buf) == before:
+                break            # timed out, hand back whatever there is
+        out, self._buf = bytes(self._buf[:n]), self._buf[n:]
+        return out
+
+    def readline(self) -> bytes:
+        while b"\n" not in self._buf:
+            before = len(self._buf)
+            self._fill(block=True)
+            if len(self._buf) == before:
+                return b""       # the caller's quiet timer decides what next
+        i = self._buf.index(b"\n") + 1
+        out, self._buf = bytes(self._buf[:i]), self._buf[i:]
+        return out
+
+    def reset_input_buffer(self) -> None:
+        self._fill(block=False)
+        self._buf.clear()
+
+    def close(self) -> None:
+        self._sock.close()
+
+
+class Polargraph(Grbl):
+    """A wall hanging plotter on FluidNC, over WiFi or USB.
+
+    FluidNC speaks GRBL 1.1 on the wire, so most of `Grbl` applies unchanged:
+    the character counting streamer, the `?` status poll, the hold-then-reset
+    halt, the modal G-code economy. What differs is everything that follows
+    from this machine not being cartesian and not being able to home.
+
+    **The board does the kinematics, not this class.** FluidNC's WallPlotter
+    converts paper coordinates to cord lengths on the ESP32 and, crucially,
+    cuts each move into `segment_length` pieces first, because a straight
+    line on the paper is not a straight line in cord space. Unsegmented, a
+    line across the bench board bows 82 mm. So this class sends ordinary
+    cartesian G-code and does NOT pre-segment. Doing it in both places would
+    multiply the byte count for no gain, and bytes are the scarce thing here:
+    see `Grbl.encode`, where lookahead depth is set purely by how many moves
+    fit in the board's receive buffer.
+
+    `polargraph.max_segment_length` is what decides the board's number. There
+    is no way to read it back over the wire, so the config file and the
+    claims on it are the only thing keeping the two in step. That is the one
+    silent failure left in this machine, and it is named here rather than
+    papered over: a board flashed with too coarse a segment_length will draw
+    bowed lines and report nothing wrong.
+
+    **It cannot home, so a lost position is lost.** See `set_origin_here`,
+    which refuses and says why.
+
+    **Its limits are not a rectangle.** A polargraph has dead corners where
+    the cords go near horizontal, so the envelope check is delegated to
+    `polargraph.Polargraph.check`, which knows about cord angles. A paper
+    rectangle alone would pass points the machine draws badly or cannot
+    reach at all.
+    """
+
+    def __init__(self, geom, host: Optional[str] = None, port: int = 23,
+                 serial_port: Optional[str] = None, baud: int = 115200,
+                 home: Optional[Tuple[float, float]] = None,
+                 pen_up_z: float = 5.0, pen_down_z: float = 0.0,
+                 pen_dwell_s: float = 0.25, feed: int = 3000,
+                 rx_buffer: int = 128):
+        """`geom` is a `polargraph.Polargraph`. Give `host` OR `serial_port`.
+
+        `home` is the paper point the gondola sits on at power on, in paper
+        mm. It defaults to the centre of the sheet, which is what
+        `polargraph.fluidnc_frame` assumes and what the config tells the
+        operator to mark with a cross. Park somewhere else and you must say so
+        here AND regenerate the config, or the two disagree with no symptom
+        beyond a drawing in the wrong place.
+        """
+        if (host is None) == (serial_port is None):
+            raise ValueError(
+                "give exactly one of host (WiFi) or serial_port (USB), so it "
+                "is never ambiguous which machine this is talking to"
+            )
+        super().__init__(port=serial_port or "", baud=baud,
+                         travel=geom.travel, pen_up_z=pen_up_z,
+                         pen_down_z=pen_down_z, pen_dwell_s=pen_dwell_s,
+                         feed=feed, flip_y=False)
+        self.geom = geom
+        self.host, self.net_port = host, port
+        self.home = home if home is not None else (geom.travel[0] / 2.0,
+                                                   geom.travel[1] / 2.0)
+        self.RX_BUFFER = rx_buffer
+
+    # ---- coordinates -------------------------------------------------------
+
+    def _xy(self, x: float, y: float) -> Tuple[float, float]:
+        """Paper mm, y down from the top left, into FluidNC's frame.
+
+        FluidNC's y runs UP, and its origin is wherever the gondola was parked
+        at power on, because `WallPlotter::init()` derives its zero cord
+        lengths from cartesian (0, 0) at boot. So the mapping is a translation
+        onto the park point plus a y flip, not `Grbl`'s flip about the travel
+        height. `flip_y` is forced off in the constructor for that reason.
+        """
+        return (x - self.home[0], self.home[1] - y)
+
+    def check(self, points) -> list:
+        """Delegated to the geometry, which knows this is not a rectangle."""
+        return self.geom.check(points)
+
+    # ---- connecting --------------------------------------------------------
+
+    def connect(self) -> None:
+        if self.host is not None:
+            self.sp = _Socket(self.host, self.net_port)
+            # No settling sleep and no flush of a reset banner, because
+            # opening a socket does not reset the board. That is the whole
+            # argument for preferring WiFi on a machine that cannot home.
+        else:
+            import serial
+
+            self.sp = serial.Serial(self.port, self.baud, timeout=2)
+            time.sleep(2.0)      # USB asserts DTR, which DOES reset the board
+            self.sp.reset_input_buffer()
+            self._send("", 0.3)  # shake off any half command left by a replug
+
+        ident = self._send("$I", 0.4)
+        if "FluidNC" not in ident:
+            self.disconnect()
+            raise RuntimeError(
+                f"this board is not running FluidNC: $I said {ident!r}. A "
+                "plain GRBL board has no WallPlotter kinematics, so it would "
+                "take the cord lengths as X and Y and draw something that is "
+                "not your path, reporting nothing"
+            )
+
+        self._send("G21", 0.2)   # millimetres
+        self._send("G90", 0.2)   # absolute
+        self._send("G94", 0.2)   # feed is units per minute
+
+        # Deliberately NOT setting the origin, same as Grbl.connect and for a
+        # stronger reason here: on this machine it cannot be set at all.
+        self.penup()
+
+    def set_origin_here(self) -> None:
+        """Refused, always. A polargraph's origin is set by rebooting it.
+
+        `Grbl.set_origin_here` writes a work offset with `G10 L20`, which is
+        the right answer on the CoreXY machine: shift the frame so the
+        carriage's current position reads as zero.
+
+        It is the WRONG answer here, and quietly so. FluidNC's WallPlotter
+        computes `zero_left` and `zero_right` once, in `init()` at boot, from
+        wherever cartesian (0, 0) was at that moment. A work offset moves the
+        coordinate labels without re-deriving those cord lengths, so the
+        machine would report exactly the numbers you asked for while driving
+        the cords from a stale reference. Nothing anywhere would report it.
+
+        The only way to re-zero is to park the gondola on its cross by hand
+        and power cycle the board.
+        """
+        raise NotImplementedError(
+            "a polargraph's origin cannot be set over the wire. Park the "
+            "gondola on its centre cross and reboot the board: FluidNC "
+            "derives its zero cord lengths at boot, and a G10 work offset "
+            "would shift the labels without shifting the kinematics"
+        )
+
+    def disconnect(self) -> None:
+        """Lift, go back to the park point, and only then let go.
+
+        Mechanically the same as `Grbl.disconnect`, but for a sharper reason.
+        Returning to (0, 0) puts the gondola back on its cross, so the next
+        power on re-derives the same zero cord lengths and the machine wakes
+        up still calibrated. Close the connection anywhere else and somebody
+        has to re-park it by hand before it can draw again.
+        """
+        super().disconnect()
