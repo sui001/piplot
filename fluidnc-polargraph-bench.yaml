@@ -153,6 +153,11 @@ axes:
   # (motors[_left_axis] = 0 - (left_length - zero_left)). If the gondola runs
   # away from the left anchor when it should approach it, flip this one
   # motor's dir_pin with :low, not both.
+  #
+  # VERIFIED 21 Sep on the bench, both motors as wired, shafts facing out:
+  # G1 Y+ (gondola up) turns them OPPOSITE ways, G1 X+ (right) turns them
+  # the SAME way, which is what winding in both cords, and letting one out
+  # while taking one in, look like. No :low on either direction pin.
   x:
     steps_per_mm: 80.000
     max_rate_mm_per_min: 6000.000      # 100 mm/s, plenty for ink
