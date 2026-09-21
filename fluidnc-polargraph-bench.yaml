@@ -1,5 +1,5 @@
 board: ESP32-S3 SuperMini
-name: polargraph bench rig, 1.5 x 1.0 m whiteboard
+name: polargraph bench rig, portrait whiteboard 930 x 1500 usable
 meta: gen3d / Cybernetic Garden. Generated against polargraph.whiteboard().
 
 # ---------------------------------------------------------------------------
@@ -24,13 +24,30 @@ meta: gen3d / Cybernetic Garden. Generated against polargraph.whiteboard().
 # is for suidraw-0, and it is the only guard there is.
 #
 # Geometry, all from polargraph.whiteboard():
-#   anchors 1700 mm apart, whiteboard 1500 x 1000 mm hung 600 mm below them
-#   park point = board centre, so the board spans x -750..750, y -500..500
-#   anchors relative to the park point: (-850, +1100) and (+850, +1100)
+#   board 1100 x 1700 mm physically, 930 x 1500 mm usable. PORTRAIT.
+#   anchors 940 mm apart, 500 mm above the top of the usable area
+#   park point = centre of the usable area, so it spans x -465..465,
+#     y -750..750, and the anchors sit at (-470, +1250) and (+470, +1250)
 #
-# The 600 mm drop is not a guess. At a 60 mm drop only 61% of the board
-# clears the 20 degree cord angle floor, and widening the anchors makes that
-# WORSE, not better. Height above the paper is the lever, not width.
+# Neither number is a guess, and both are counterintuitive.
+#
+# The anchors are only 10 mm wider than the board because WIDENING THEM MAKES
+# IT WORSE. A wider span lays the far cord flatter at the top corners, which
+# is where the angle floor bites: the worst corner cord goes 28.1, 26.3,
+# 24.2, 21.6 degrees as the span goes 940, 1090, 1300, 1600 mm. Monotonic.
+# At a 350 mm drop that same walk crosses the floor and corners get refused.
+#
+# The 500 mm drop buys the margin that makes it forgiving. 350 mm is the
+# least that reaches every corner, but it leaves the worst cord at 20.5
+# degrees against a 20 degree floor. 500 mm puts it at 28 degrees and drops
+# peak cord tension from 11.2 N to 8.3 N, for 150 mm of wall and 120 mm of
+# belt. Height is the lever, not width: mount the motors high and barely
+# wider than the sheet. With 500 mm of drop, being 100 mm out on the span
+# costs nothing.
+#
+# Wall needed: 1.14 m wide, and 2.0 m from the anchors down to the bottom of
+# the usable area. Belt: about 4.2 m per side, 8.4 m total, which includes
+# the tail that has to pay out as the gondola crosses the board.
 # ---------------------------------------------------------------------------
 
 stepping:
@@ -44,19 +61,19 @@ stepping:
 kinematics:
   WallPlotter:
     left_axis: 0
-    left_anchor_x: -850.000
-    left_anchor_y: 1100.000
+    left_anchor_x: -470.000
+    left_anchor_y: 1250.000
     right_axis: 1
-    right_anchor_x: 850.000
-    right_anchor_y: 1100.000
+    right_anchor_x: 470.000
+    right_anchor_y: 1250.000
 
     # A straight line on the paper is NOT a straight line in cord space, and
-    # this is the number that hides the difference. Unsegmented, a 1350 mm
-    # horizontal line across this board bows 121 mm. polargraph's
-    # max_segment_length() says 22.9 mm holds the bow under 0.1 mm here, and
+    # this is the number that hides the difference. Unsegmented, a line
+    # across the full 930 mm width at mid height bows 82 mm. polargraph's
+    # max_segment_length() says 20.2 mm holds the bow under 0.1 mm here, and
     # 22.8 mm does the same in the full stairwell, so one value covers both.
     # 10 mm is FluidNC's own default and is comfortably inside that. Raising
-    # it above 20 is how the drawing starts bowing again.
+    # it past 20 is how the drawing starts bowing again.
     segment_length: 10.000
 
 axes:
@@ -76,7 +93,7 @@ axes:
     steps_per_mm: 80.000
     max_rate_mm_per_min: 6000.000      # 100 mm/s, plenty for ink
     acceleration_mm_per_sec2: 100.000  # see the pendulum note at the bottom
-    max_travel_mm: 2500.000            # longest the left cord ever gets
+    max_travel_mm: 2300.000            # longest the left cord ever gets (2.21 m)
     soft_limits: false
     motor0:
       limit_neg_pin: NO_PIN
@@ -93,7 +110,7 @@ axes:
     steps_per_mm: 80.000
     max_rate_mm_per_min: 6000.000
     acceleration_mm_per_sec2: 100.000
-    max_travel_mm: 2500.000
+    max_travel_mm: 2300.000
     soft_limits: false
     motor0:
       limit_neg_pin: NO_PIN
@@ -151,16 +168,20 @@ start:
 # Tuning, in the order it will actually matter.
 #
 # 1. acceleration_mm_per_sec2 is the pendulum knob, and it is the one real
-#    problem this machine has. The gondola on 1.7 m cords is a 2.3 second
-#    pendulum with almost nothing damping it, and in the stairwell it will be
-#    6.1 seconds. Every acceleration rings it. 100 is a deliberately timid
-#    starting point. Raise it until the lines start to wobble, then halve it.
+#    problem this machine has. On cords up to 2.2 m the gondola is a 3.0
+#    second pendulum with almost nothing damping it, and in the stairwell it
+#    will be 6.1 seconds. Every acceleration rings it, and a heavier gondola
+#    rings LONGER, because air drag barely grows with mass while the stored
+#    swing energy grows in proportion. 100 is a deliberately timid starting
+#    point. Raise it until the lines wobble, then halve it.
 #
 # 2. idle_ms is 255 (never disable) on purpose. Releasing the motors drops
 #    the gondola, and since there is no homing it never finds itself again.
 #
 # 3. Sag is NOT corrected here and does not need to be on this rig: with an
-#    800 g gondola it is under 0.03 mm anywhere on the board. It reaches about
+#    800 g gondola it is under 0.04 mm anywhere on the board, and peak cord
+#    tension is 8.3 N, which is 5.3 N.cm at a 20 tooth GT2 pulley: about an
+#    eighth of what a NEMA 17 holds. It reaches about
 #    0.9 mm at full stairwell scale with a 1.5 kg gondola, which is still
 #    below the segment tolerance. polargraph.sag_error_mm() reports it.
 # ---------------------------------------------------------------------------

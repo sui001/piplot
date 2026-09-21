@@ -59,19 +59,18 @@ def main() -> int:
     require(worst < 1e-6, "round trip closes to under a micron everywhere")
 
     print("\nthe bow: what an unsegmented move actually does")
-    for m, name, span in ((bench, "bench", 1500.0), (shaft, "shaft", 2200.0)):
+    for m, name in ((bench, "bench"), (shaft, "shaft")):
         tw, th = m.travel
-        y = th * 0.75
-        b = m.bow((tw * 0.05, y), (tw * 0.95, y))
-        note(f"{name}: one {span * 0.9:.0f} mm horizontal line, unsegmented, "
-             f"bows {b:.2f} mm")
-    require(bench.bow((75.0, 750.0), (1425.0, 750.0)) > 1.0,
+        b = m.bow((0.0, th / 2.0), (tw, th / 2.0))
+        note(f"{name}: one {tw:.0f} mm horizontal line at mid height, "
+             f"unsegmented, bows {b:.2f} mm")
+    require(bench.bow((0.0, 750.0), (930.0, 750.0)) > 1.0,
             "the bow is real and larger than a pen nib, so segmenting is not "
             "optional")
 
     print("\nsegmenting shrinks the bow to the tolerance asked for")
     for tol in (1.0, 0.25, 0.05):
-        pts = bench.segment_path([(75.0, 750.0), (1425.0, 750.0)], tol=tol)
+        pts = bench.segment_path([(0.0, 750.0), (930.0, 750.0)], tol=tol)
         worst = max(bench.bow(a, b) for a, b in zip(pts, pts[1:]))
         require(worst <= tol + 1e-9,
                 f"tol {tol:>5.2f} mm: {len(pts) - 1:>3d} pieces, worst piece "
@@ -100,32 +99,57 @@ def main() -> int:
 
     print("\nrefusals: the machine says no before the belt skips")
     require(bench.check([]) != [], "an empty path is refused")
-    require(bench.check([(750.0, 500.0)]) == [],
+    require(bench.check([(465.0, 750.0)]) == [],
             "the middle of the board is accepted")
-    require(any("paper is" in r for r in bench.check([(-50.0, 500.0)])),
+    require(any("paper is" in r for r in bench.check([(-50.0, 750.0)])),
             "a point off the left edge is refused")
     # Deliberately badly hung: the board's top edge 40 mm under the anchors,
     # which is where every first build puts it. The floor has to catch that.
     flat = whiteboard(drop=40.0)
     require(any("degrees off horizontal" in r
-                for r in flat.check([(750.0, 1.0)])),
+                for r in flat.check([(465.0, 1.0)])),
             "on a badly hung rig the flat top edge is refused by the angle "
             "floor and not silently drawn")
-    require(bench.check([(750.0, 1.0)]) == [],
-            "on the 600 mm drop the same point is safe, which is the whole "
+    require(bench.check([(465.0, 1.0)]) == [],
+            "on the 500 mm drop the same point is safe, which is the whole "
             "reason for hanging it lower")
-    require(bench.check([(750.0, 900.0)]) == [],
+    require(bench.check([(465.0, 1400.0)]) == [],
             "low on the board, where the cords hang steep, is accepted")
 
     print("\nthe dead corners are declared, not discovered on paper")
     tw, th = bench.travel
-    good = [p for p in grid(bench, 21) if not bench.check([p])]
-    frac = len(good) / (21 * 21)
+    corners = [(0.0, 0.0), (tw, 0.0), (0.0, th), (tw, th)]
+    require(all(not bench.check([c]) for c in corners),
+            "every CORNER of the board is reachable. Cell centres are not "
+            "enough: an earlier sweep sampled only those and concluded a span "
+            "NARROWER than the board was fine, which it is not")
+    n = 21
+    edges = [(tw * i / (n - 1), th * j / (n - 1))
+             for i in range(n) for j in range(n)]
+    frac = sum(1 for p in edges if not bench.check([p])) / len(edges)
     note(f"bench: {frac * 100:.0f}% of the board is drawable at a "
-         f"{bench.min_cord_angle_deg:.0f} degree floor")
-    require(frac > 0.5,
-            "more than half the whiteboard is usable, or the anchors are in "
-            "the wrong place")
+         f"{bench.min_cord_angle_deg:.0f} degree floor, edges included")
+    require(frac == 1.0,
+            "all of the usable area is drawable, edges and corners included")
+    # Widening the anchors makes a polargraph WORSE, and this is the evidence.
+    # The worst corner cord lies flatter at every step out, at any drop. At a
+    # 350 mm drop that crosses the floor and corners start being refused; at
+    # 500 mm it does not, which is what the extra 150 mm of wall bought.
+    for drop, refuses in ((350.0, True), (500.0, False)):
+        angs = [min(min(whiteboard(span=s, drop=drop).cord_angle_deg(*c))
+                    for c in corners)
+                for s in (940.0, 1090.0, 1300.0, 1600.0)]
+        note(f"drop {drop:.0f} mm: worst corner cord goes "
+             f"{' -> '.join(f'{a:.1f}' for a in angs)} deg as the span goes "
+             "940 -> 1600 mm")
+        require(all(b < a for a, b in zip(angs, angs[1:])),
+                f"at a {drop:.0f} mm drop every widening of the span lays the "
+                "worst corner cord flatter, with no exception")
+        hit = any(whiteboard(span=1600.0, drop=drop).check([c])
+                  for c in corners)
+        require(hit is refuses,
+                f"at a {drop:.0f} mm drop a 1600 mm span "
+                f"{'does' if refuses else 'does not'} refuse a corner")
 
     print(NL + "the FluidNC config says the same thing this module does")
     if not os.path.exists(YAML):

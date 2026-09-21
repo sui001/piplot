@@ -258,21 +258,39 @@ class Polargraph:
 
 # ---- named rigs ------------------------------------------------------------
 
-def whiteboard(span: float = 1700.0,
-               board: Tuple[float, float] = (1500.0, 1000.0),
-               drop: float = 600.0, **kw) -> Polargraph:
-    """The 1.5 x 1.0 m whiteboard bench rig, anchors 1.7 m apart above it.
+def whiteboard(span: float = 940.0,
+               board: Tuple[float, float] = (930.0, 1500.0),
+               drop: float = 500.0, **kw) -> Polargraph:
+    """The bench rig: a portrait whiteboard, 930 x 1500 mm of usable area.
 
-    `drop` is how far the board's top edge hangs below the anchor line, and
-    600 mm is not a guess. Sweeping it against the usable area says something
-    counterintuitive: **widening the anchors makes a polargraph worse.** At
-    1.7 m anchors and a 60 mm drop only 61% of the board clears the 20 degree
-    cord floor, and pushing the anchors out to 2.5 m drops that to 47%. Hang
-    the same board 600 mm lower instead and all of it is drawable, with the
-    narrowest anchors and the least wall.
+    The board is 1100 x 1700 mm physically. Only the usable area is modelled,
+    because the frame is not drawable and a machine that believes otherwise
+    will cheerfully try to draw on it.
 
-    So the lever is height above the paper, not width. Mount the motors high
-    and the paper low.
+    Both defaults came out of a sweep, and both are counterintuitive.
+
+    **span = 940, ten millimetres wider than the board.** Widening the anchors
+    makes a polargraph worse, not better, because a wider span lays the far
+    cord flatter at the top corners, which is exactly where the angle floor
+    bites. The worst corner cord goes 28.1, 26.3, 24.2, 21.6 degrees as the
+    span goes 940, 1090, 1300, 1600 mm. Monotonic, no exceptions. At a 350 mm
+    drop the same walk crosses the floor and corners start being refused
+    outright. The anchors want to be barely wider than the paper.
+
+    **drop = 500, half a metre of clear wall above the board.** 350 mm is the
+    least that covers every corner, but it leaves the worst cord at 20.5
+    degrees, half a degree inside the floor. 500 mm puts it at 28 degrees and
+    cuts peak cord tension from 11.2 N to 8.3 N, for 150 mm of wall and about
+    120 mm of extra belt. That margin is also what makes the span forgiving:
+    at 500 mm even a 1600 mm span still clears the floor, so getting the
+    mounting slightly wrong stops mattering.
+
+    So the lever is height above the paper, not width: mount the motors high
+    and barely wider than the sheet.
+
+    An earlier sweep sampled cell centres and concluded a span NARROWER than
+    the board was fine. It is not. It never tested a corner, which is the only
+    place this fails. Sample the edges.
     """
     return Polargraph(span=span, travel=board,
                       origin=((span - board[0]) / 2.0, drop), **kw)
