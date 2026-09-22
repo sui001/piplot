@@ -141,6 +141,12 @@ def load(path: str | None = None) -> dict:
 
     out = {}
     for name, entry in raw.items():
+        # Keys starting with "_" are notes for the human editing the file.
+        # machines.example.json opens with "_comment" and tells you to copy
+        # it, so without this a machines.json made exactly as instructed
+        # failed to load. Found 22 Sep setting up polarpi.
+        if name.startswith("_"):
+            continue
         if not isinstance(entry, dict):
             raise ValueError(f"{path}: {name} is not an object")
         driver = entry.get("driver", "axidraw")
