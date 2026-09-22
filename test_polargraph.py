@@ -200,8 +200,9 @@ def main() -> int:
                 "config admits it cannot home and has no soft limits, so the "
                 "Pi side check() is known to be the only guard")
         used = re.findall(r"^[^#\n]*gpio\.(\d+)", text, re.M)
-        require(len(used) == 6,
-                f"exactly six pins are driven, found {len(used)}. This is "
+        require(len(used) == 8,
+                f"exactly eight pins are used (six for motors, EN and servo, "
+                f"two for the Pi's UART), found {len(used)}. This is "
                 "here because an earlier regex crossed line breaks, saw four "
                 "of the six, and passed the duplicate check anyway")
         require(len(used) == len(set(used)),

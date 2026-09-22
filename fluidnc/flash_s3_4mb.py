@@ -225,17 +225,22 @@ def cmd_upload(a) -> int:
     # instead of FluidNC. Found 21 Sep the hard way: every probe knocked
     # FluidNC off the chip it had just been verified onto.
     #
-    # WINDOWS ONLY as written. On Linux pyserial applies these one at a time
-    # after the kernel has raised both lines, DTR first, and the instant of
-    # DTR low with RTS high resets a classic devkit (measured on polarpi,
-    # 22 Sep). plotter.Polargraph.connect has the Linux-safe ordering. This
-    # upload reboots the board with $Bye anyway, so a reset here costs
-    # nothing, but do not copy this pattern into anything that must not reset.
-    sp = serial.Serial()
-    sp.port, sp.baudrate, sp.timeout = a.port, 115200, 2
-    sp.dtr = False
-    sp.rts = False
-    sp.open()
+    # That is right on WINDOWS, where the lines are set atomically at open.
+    # On Linux pyserial applies them one at a time after the kernel has
+    # raised both, DTR first, and the instant of DTR low with RTS high resets
+    # a classic devkit (measured on polarpi, 22 Sep). A reset here would
+    # land the $Xmodem command on a board still booting. So on Linux: open
+    # with defaults, then RTS low first, then DTR, as Polargraph.connect does.
+    if os.name == "nt":
+        sp = serial.Serial()
+        sp.port, sp.baudrate, sp.timeout = a.port, 115200, 2
+        sp.dtr = False
+        sp.rts = False
+        sp.open()
+    else:
+        sp = serial.Serial(a.port, 115200, timeout=2)
+        sp.rts = False
+        sp.dtr = False
     time.sleep(0.5)
     sp.reset_input_buffer()
     sp.write(b"\n")

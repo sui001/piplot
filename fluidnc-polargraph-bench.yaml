@@ -242,12 +242,45 @@ axes:
 #   gpio.25  y step        right cord
 #   gpio.26  y dir
 #   gpio.27  pen servo, 50 Hz PWM
-#   gpio.13  shared enable, active low, both drivers
+#   gpio.13  both drivers' EN (a disable pin, :high, see axes above)
+#   gpio.17  UART1 TX  to the Pi's GPIO15 (pin 10, RXD)
+#   gpio.16  UART1 RX  from the Pi's GPIO14 (pin 8, TXD)
 #
 # Do NOT power the drivers from the devkit's 3V3 regulator for motor
 # current; give the motor rail its own supply and share only ground. The
 # 3V3 pin is fine for the drivers' LOGIC supply (VDD) and MS1/MS2.
 # TMC2209 logic is 3.3 V native, so nothing needs level shifting.
+
+# ---------------------------------------------------------------------------
+# A second console on GPIO so the Pi can drive this without a USB cable.
+#
+# Three wires, both sides 3.3 V: Pi pin 8 (GPIO14 TXD) -> gpio.16, Pi pin 10
+# (GPIO15 RXD) <- gpio.17, and ground. Power the WROOM from the Pi's 5 V
+# (pin 2) into VIN. It is a full FluidNC channel, same protocol as USB; the
+# USB console stays for flashing and debugging.
+#
+# Why it is worth it beyond the cable: a bare UART has no DTR or RTS, so a
+# reset on connect is physically impossible, where over USB it took a
+# careful open sequence (see plotter.Polargraph.connect).
+#
+# Only for a short run, the Pi beside the WROOM in one box: bare 3.3 V
+# serial is good to about a metre. For longer, USB is the better cable.
+#
+# 16 and 17 are free on a WROOM. On a WROVER they are the PSRAM's, so do
+# not carry this to a WROVER board unchanged.
+#
+# report_interval_ms 0: no unsolicited status reports. piplot polls with ?
+# when it wants one, and a stream of reports would only be noise between
+# the oks the streamer counts.
+uart1:
+  txd_pin: gpio.17
+  rxd_pin: gpio.16
+  baud: 115200
+  mode: 8N1
+
+uart_channel1:
+  uart_num: 1
+  report_interval_ms: 0
 
 start:
   must_home: false
