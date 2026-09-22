@@ -742,18 +742,26 @@ class Polargraph(Grbl):
         else:
             import serial
 
-            # DTR and RTS low BEFORE the port opens. A devkit's auto-reset
-            # circuit turns those lines into EN and BOOT, so pyserial's default
-            # open resets the board, and on this machine a reset re-derives the
-            # zero from wherever the gondola happens to hang. Learned on the
-            # S3 on 21 Sep, where every probe knocked the firmware off. Whether
-            # a given OS still pulses DTR during open is checked on the
-            # target, not assumed: see test_polargraph_hw.py.
-            self.sp = serial.Serial()
-            self.sp.port, self.sp.baudrate, self.sp.timeout = self.port, self.baud, 2
-            self.sp.dtr = False
+            # How the port opens decides whether the board resets, and on this
+            # machine a reset re-derives the zero from wherever the gondola
+            # hangs. A classic devkit's auto-reset circuit pulls EN low (reset)
+            # exactly when RTS is asserted and DTR is not. So the rule is:
+            # never let DTR fall while RTS is still up.
+            #
+            # Open with pyserial's defaults (the kernel raises both lines
+            # together, which is no reset), then drop RTS FIRST, then DTR.
+            #
+            # The previous version set dtr=False, rts=False before open. On
+            # Windows that is applied atomically at open and was fine. On
+            # Linux pyserial applies them one at a time after the kernel has
+            # raised both, DTR first, leaving an instant of DTR low with RTS
+            # high, which is a reset. Measured on polarpi 22 Sep, twice each:
+            #   dtr/rts False before open        RESET, 1794 byte boot banner
+            #   defaults, lines left up          no reset
+            #   defaults, then RTS low, DTR low  no reset   <- this
+            self.sp = serial.Serial(self.port, self.baud, timeout=2)
             self.sp.rts = False
-            self.sp.open()
+            self.sp.dtr = False
 
             # Listen before speaking. Anything the board says unprompted in
             # the first moments is a boot banner, which means opening the port

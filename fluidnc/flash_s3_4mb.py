@@ -224,6 +224,13 @@ def cmd_upload(a) -> int:
     # strap held low, so it lands in the ROM loader ("waiting for download")
     # instead of FluidNC. Found 21 Sep the hard way: every probe knocked
     # FluidNC off the chip it had just been verified onto.
+    #
+    # WINDOWS ONLY as written. On Linux pyserial applies these one at a time
+    # after the kernel has raised both lines, DTR first, and the instant of
+    # DTR low with RTS high resets a classic devkit (measured on polarpi,
+    # 22 Sep). plotter.Polargraph.connect has the Linux-safe ordering. This
+    # upload reboots the board with $Bye anyway, so a reset here costs
+    # nothing, but do not copy this pattern into anything that must not reset.
     sp = serial.Serial()
     sp.port, sp.baudrate, sp.timeout = a.port, 115200, 2
     sp.dtr = False
