@@ -742,9 +742,36 @@ class Polargraph(Grbl):
         else:
             import serial
 
-            self.sp = serial.Serial(self.port, self.baud, timeout=2)
-            time.sleep(2.0)      # USB asserts DTR, which DOES reset the board
-            self.sp.reset_input_buffer()
+            # DTR and RTS low BEFORE the port opens. A devkit's auto-reset
+            # circuit turns those lines into EN and BOOT, so pyserial's default
+            # open resets the board, and on this machine a reset re-derives the
+            # zero from wherever the gondola happens to hang. Learned on the
+            # S3 on 21 Sep, where every probe knocked the firmware off. Whether
+            # a given OS still pulses DTR during open is checked on the
+            # target, not assumed: see test_polargraph_hw.py.
+            self.sp = serial.Serial()
+            self.sp.port, self.sp.baudrate, self.sp.timeout = self.port, self.baud, 2
+            self.sp.dtr = False
+            self.sp.rts = False
+            self.sp.open()
+
+            # Listen before speaking. Anything the board says unprompted in
+            # the first moments is a boot banner, which means opening the port
+            # reset it after all, and its zero is now wherever the gondola
+            # hangs. That is fine only if it happened to be parked, which
+            # nothing here can know, so say so rather than draw.
+            time.sleep(1.5)
+            unprompted = self.sp.read(self.sp.in_waiting or 0).decode(
+                errors="replace")
+            if any(k in unprompted for k in ("FluidNC v", "ets ", "rst:")):
+                self.sp.close()
+                self.sp = None
+                raise RuntimeError(
+                    "opening the port reset the board, so its zero is now "
+                    "wherever the gondola was hanging. Park it on the centre "
+                    "cross, power cycle the board, and retry. If this happens "
+                    "on every connect, fit a 10 uF capacitor from EN to GND "
+                    "on the devkit to disable its auto-reset")
             self._send("", 0.3)  # shake off any half command left by a replug
 
         ident = self._send("$I", 0.4)
@@ -763,7 +790,132 @@ class Polargraph(Grbl):
 
         # Deliberately NOT setting the origin, same as Grbl.connect and for a
         # stronger reason here: on this machine it cannot be set at all.
+        self._at = self._read_at()
         self.penup()
+
+    # ---- never send a move that goes nowhere --------------------------------
+    #
+    # FluidNC 4.1.0's WallPlotter has a bug in cartesian_to_motors: when a
+    # move's total distance is exactly zero it calls mc_move_motors(target)
+    # with the CARTESIAN target, skipping the conversion to cord lengths. The
+    # motors then go to cord offsets numerically equal to the paper
+    # coordinates. Found 21 Sep on the bench: a redundant "G0 Z5" (Z already
+    # 5) at (12, 7) threw the gondola to (-26.942, 2.926), which the bug
+    # predicts to three decimals. At the park point the two frames coincide,
+    # which is why nothing showed until then; near a corner the same bug
+    # yanks the gondola more than a metre.
+    #
+    # So this class tracks where FluidNC believes it is and drops any move
+    # within MOVE_EPS of it on every axis. The tolerance, not exact equality,
+    # matters: the start position comes from MPos, which is forward
+    # kinematics of whole steps (11.999 for a commanded 12), so an exact
+    # compare would let a true zero-distance move through.
+    MOVE_EPS = 0.05
+
+    def _read_at(self):
+        """(x, y, z) as FluidNC reports it, in its own frame."""
+        import re
+
+        self.sp.reset_input_buffer()
+        self.sp.write(b"?")
+        time.sleep(0.3)
+        reply = self.sp.read(self.sp.in_waiting or 1).decode(errors="replace")
+        m = re.search(r"MPos:([-\d.]+),([-\d.]+),([-\d.]+)", reply)
+        if not m:
+            raise RuntimeError(f"no position in the status reply {reply!r}, "
+                               "so a move to nowhere cannot be ruled out")
+        return tuple(float(v) for v in m.groups())
+
+    def _move(self, code: str, x=None, y=None, z=None, feed=None):
+        """One G0/G1 line, or None if it would go nowhere. Updates _at.
+
+        Axes left as None are unchanged. `_at` None means not connected yet
+        (the offline claims), where every line is emitted as asked.
+        """
+        at = getattr(self, "_at", None)
+        tx = at[0] if (x is None and at) else x
+        ty = at[1] if (y is None and at) else y
+        tz = at[2] if (z is None and at) else z
+        if at is not None and all(
+                v is None or abs(v - a) < self.MOVE_EPS
+                for v, a in zip((tx, ty, tz), at)):
+            return None
+        parts = [code]
+        if x is not None:
+            parts.append(f"X{x:.2f}")
+        if y is not None:
+            parts.append(f"Y{y:.2f}")
+        if z is not None:
+            parts.append(f"Z{z:g}")
+        if feed is not None:
+            parts.append(f"F{feed}")
+        if at is not None:
+            self._at = (tx, ty, tz)
+        return "".join(parts)
+
+    def _pen(self, z: float) -> None:
+        line = self._move("G0", z=z)
+        if line:
+            self._send(line, 0.05)
+            self._send(f"G4 P{self.pen_dwell_s:g}", 0.05)
+
+    def penup(self) -> None:
+        self._pen(self.pen_up_z)
+        self.down = False
+
+    def pendown(self) -> None:
+        self._pen(self.pen_down_z)
+        self.down = True
+
+    def goto(self, x: float, y: float) -> None:
+        mx, my = self._xy(x, y)
+        line = (self._move("G1", mx, my, feed=self.feed) if self.down
+                else self._move("G0", mx, my))
+        if line:
+            self._send(line, 0.01)
+
+    def encode(self, points) -> list:
+        """Grbl.encode's economy, with every move to nowhere dropped.
+
+        Lift if not already up, travel if not already there, drop, draw,
+        lift. Each G1 line carries only the axes that changed; the first one
+        after the pen drop restates G1 and the feed, since the G0 lift and
+        drop left the modal state at G0.
+        """
+        out = []
+        up = self._move("G0", z=self.pen_up_z)
+        if up:
+            out.append(up)
+        fx, fy = self._xy(*points[0])
+        travel = self._move("G0", fx, fy)
+        if travel:
+            out.append(travel)
+        out.append(f"G4P{self.pen_dwell_s:g}")
+        down = self._move("G0", z=self.pen_down_z)
+        if down:
+            out.append(down)
+            out.append(f"G4P{self.pen_dwell_s:g}")
+        first = True
+        last = (f"{fx:.2f}", f"{fy:.2f}")     # tracked here, so the economy
+        for x, y in points[1:]:               # holds offline too
+            mx, my = self._xy(x, y)
+            line = self._move("G1", mx, my, feed=self.feed if first else None)
+            if line is None:
+                continue
+            sx, sy = f"{mx:.2f}", f"{my:.2f}"
+            # Only the axes that changed at two decimals, for lookahead's
+            # sake. The first line restates G1 and the feed, since the pen
+            # drop left the modal state at G0.
+            axes = ((f"X{sx}" if sx != last[0] else "")
+                    + (f"Y{sy}" if sy != last[1] else "")) or f"X{sx}"
+            line = f"G1{axes}F{self.feed}" if first else axes
+            out.append(line)
+            last = (sx, sy)
+            first = False
+        lift = self._move("G0", z=self.pen_up_z)
+        if lift:
+            out.append(lift)
+        return out
 
     def set_origin_here(self) -> None:
         """Refused, always. A polargraph's origin is set by rebooting it.
@@ -797,5 +949,19 @@ class Polargraph(Grbl):
         power on re-derives the same zero cord lengths and the machine wakes
         up still calibrated. Close the connection anywhere else and somebody
         has to re-park it by hand before it can draw again.
+
+        Not super().disconnect(): that sends "G0 X0 Y0" unconditionally, and
+        if the gondola is already home that is a move to nowhere, which is
+        exactly what FluidNC's WallPlotter mishandles. Guarded here.
         """
-        super().disconnect()
+        if self.sp is None:
+            return
+        try:
+            self.penup()
+            home = self._move("G0", 0.0, 0.0)
+            if home:
+                self._send(home, 0.05)
+            self._wait_idle(timeout=120)
+        finally:
+            self.sp.close()
+            self.sp = None

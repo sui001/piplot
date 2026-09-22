@@ -204,7 +204,19 @@ def path_length(points) -> float:
     return sum(math.dist(points[i - 1], points[i]) for i in range(1, len(points)))
 
 
-def check_claims(points, travel, machine_name="") -> tuple[bool, list]:
+def geometry_for(chosen):
+    """The polargraph geometry behind a chosen machine, or None.
+
+    `chosen` comes from list_boards, which carries only the rectangle, so the
+    rig is read back from the registry. Opens nothing.
+    """
+    if not chosen or chosen.get("driver") != "polargraph":
+        return None
+    entry = machines.load().get(chosen["label"])
+    return machines.geometry(entry) if entry else None
+
+
+def check_claims(points, travel, machine_name="", geom=None) -> tuple[bool, list]:
     """State what makes this path plottable, and refuse rather than warn.
 
     None of these machines has home switches or soft limits of its own. Send
@@ -247,6 +259,17 @@ def check_claims(points, travel, machine_name="") -> tuple[bool, list]:
     ok &= req("y stays within travel", min(ys) >= 0 and max(ys) <= ty,
               f"y spans {min(ys):.1f} to {max(ys):.1f} mm, "
               f"{machine_name or 'the machine'} has 0 to {ty:.0f}")
+
+    # A polargraph's envelope is not the rectangle above. It has dead corners
+    # where a cord lies near flat and the gondola cannot hold a line, and
+    # places above or outside the anchors it cannot reach at all. The
+    # rectangle passes those; only the geometry knows. Refused here, before
+    # the motors are enabled, rather than halfway through a drawing.
+    if geom is not None:
+        extra = [r for r in geom.check(points)
+                 if not r.startswith(("x spans", "y spans"))]
+        ok &= req("every point is reachable, with no cord near flat",
+                  not extra, "; ".join(extra))
     return bool(ok), out
 
 
@@ -426,15 +449,30 @@ def grbl_worker(job, paths, entry):
     wherever the carriage happened to be. The operator has already confirmed
     the carriage is parked, which is what makes the zeroing below legitimate.
     """
-    from plotter import Grbl, merge_paths
+    from plotter import Grbl, Polargraph, merge_paths
 
-    g = Grbl(port=job.device,
-             travel=tuple(entry["travel"]),
-             feed=int(entry.get("feed", 5000)),
-             pen_up_z=float(entry.get("pen_up_z", 1.0)),
-             pen_down_z=float(entry.get("pen_down_z", 0.0)),
-             pen_dwell_s=float(entry.get("pen_dwell_s", 0.25)),
-             flip_y=bool(entry.get("flip_y", True)))
+    # The polargraph runs FluidNC, which speaks the same GRBL protocol, so it
+    # rides this worker. What differs is the origin: a GRBL carriage is zeroed
+    # here by G10 because the operator confirmed it is parked, but FluidNC's
+    # WallPlotter derives its zero cord lengths once, at boot, and a G10 would
+    # move the labels without moving the kinematics. Polargraph.set_origin_here
+    # refuses for exactly that reason, so it is simply not called.
+    polar = entry["driver"] == "polargraph"
+    if polar:
+        g = Polargraph(machines.geometry(entry),
+                       serial_port=job.device,
+                       feed=int(entry.get("feed", 3000)),
+                       pen_up_z=float(entry.get("pen_up_z", 5.0)),
+                       pen_down_z=float(entry.get("pen_down_z", 0.0)),
+                       pen_dwell_s=float(entry.get("pen_dwell_s", 0.25)))
+    else:
+        g = Grbl(port=job.device,
+                 travel=tuple(entry["travel"]),
+                 feed=int(entry.get("feed", 5000)),
+                 pen_up_z=float(entry.get("pen_up_z", 1.0)),
+                 pen_down_z=float(entry.get("pen_down_z", 0.0)),
+                 pen_dwell_s=float(entry.get("pen_dwell_s", 0.25)),
+                 flip_y=bool(entry.get("flip_y", True)))
 
     lock = hold(job.device, wait=3)
     if not lock.__enter__():
@@ -443,7 +481,8 @@ def grbl_worker(job, paths, entry):
         return
     try:
         g.connect()
-        g.set_origin_here()      # legitimate: the operator confirmed the park
+        if not polar:
+            g.set_origin_here()  # legitimate: the operator confirmed the park
         drawn = merge_paths(paths)
         job.total = sum(len(p) - 1 for p in drawn)
         job.message = "drawing"
@@ -880,7 +919,8 @@ def check():
     # and says it is busy, so checking one never disturbs the other.
     hw_ok, hw, chosen = preflight(body.get("port") or None)
     travel = chosen["travel"] if chosen else None
-    ok, claims = check_claims(points, travel, chosen["label"] if chosen else "")
+    ok, claims = check_claims(points, travel, chosen["label"] if chosen else "",
+                              geometry_for(chosen))
     claims = claims + hw
     ok = ok and hw_ok
     speed = max(1, int(body.get("speed", 25)))
@@ -906,7 +946,8 @@ def plot():
     # a second or two, and one board's check must not hold up the other.
     hw_ok, hw, chosen = preflight(body.get("port") or None)
     travel = chosen["travel"] if chosen else None
-    ok, claims = check_claims(points, travel, chosen["label"] if chosen else "")
+    ok, claims = check_claims(points, travel, chosen["label"] if chosen else "",
+                              geometry_for(chosen))
     claims = claims + hw
     ok = ok and hw_ok
 
@@ -917,14 +958,30 @@ def plot():
     # is exactly why it has to be asserted by a person each time.
     parked = bool(body.get("origin_confirmed"))
     ok = ok and parked
-    claims.append({
-        "label": "the carriage is parked in the home corner",
-        "ok": parked,
-        "detail": "" if parked else
-                  "confirm the carriage is parked before plotting. No machine "
-                  "here has home switches, so it will take wherever it is "
-                  "standing as (0, 0) and every coordinate after that is wrong.",
-    })
+    if chosen and chosen.get("driver") == "polargraph":
+        # Same confirmation, different meaning. The polargraph's zero is set
+        # at boot, from wherever the gondola hangs, so what has to be true is
+        # that it was on its centre cross when the board last powered up, and
+        # has not been moved by hand or lost steps since. Every clean plot
+        # ends by returning there, which keeps it true between jobs.
+        claims.append({
+            "label": "the gondola is on its centre cross",
+            "ok": parked,
+            "detail": "" if parked else
+                      "confirm the gondola was on the centre cross when the "
+                      "board last booted, and has not been moved since. The "
+                      "polargraph takes its zero from wherever it hung at "
+                      "power on, and nothing in software can check it.",
+        })
+    else:
+        claims.append({
+            "label": "the carriage is parked in the home corner",
+            "ok": parked,
+            "detail": "" if parked else
+                      "confirm the carriage is parked before plotting. No machine "
+                      "here has home switches, so it will take wherever it is "
+                      "standing as (0, 0) and every coordinate after that is wrong.",
+        })
 
     if not ok:
         failed = [c for c in claims if not c["ok"]]
@@ -954,7 +1011,7 @@ def plot():
         job.message = "starting"
         job.total = sum(len(p) - 1 for p in paths)
         job.started = time.time()
-        if entry["driver"] == "grbl":
+        if entry["driver"] in ("grbl", "polargraph"):
             job.thread = threading.Thread(
                 target=grbl_worker, args=(job, paths, entry), daemon=True)
         else:

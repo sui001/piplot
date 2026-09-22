@@ -40,7 +40,32 @@ BY_PATH = "/dev/serial/by-path"
 
 # What an entry may say. Anything else is ignored rather than rejected, so an
 # older server does not choke on a key added for a newer machine.
-DRIVERS = ("axidraw", "grbl")
+DRIVERS = ("axidraw", "grbl", "polargraph")
+
+# A polargraph's shape is not a rectangle, so its entry names a rig from
+# polargraph.py instead of trusting a bare travel. The rig carries the anchor
+# span, the drop and the paper, which is what check() needs to refuse the dead
+# corners. Optional per-entry overrides: span, drop, gondola_g.
+POLAR_RIGS = ("whiteboard", "stairwell")
+
+
+def geometry(entry: dict):
+    """The polargraph.Polargraph an entry describes, or None if not a polargraph.
+
+    Pure: builds the geometry from the entry, opens nothing. Raises ValueError
+    for an unknown rig, since a polargraph plotted against the wrong geometry
+    draws something plausible in the wrong place and reports success.
+    """
+    if entry.get("driver") != "polargraph":
+        return None
+    import polargraph
+
+    rig = entry.get("rig")
+    if rig not in POLAR_RIGS:
+        raise ValueError(f"polargraph entry needs a rig, one of "
+                         f"{', '.join(POLAR_RIGS)}; got {rig!r}")
+    kw = {k: float(entry[k]) for k in ("span", "drop", "gondola_g") if k in entry}
+    return getattr(polargraph, rig)(**kw)
 
 
 def _resolve(entry: dict) -> str | None:
@@ -129,6 +154,18 @@ def load(path: str | None = None) -> dict:
                              f"in mm, got {travel!r}. Nothing else knows how big "
                              f"this machine is, and $130/$131 on a GRBL board "
                              f"are not to be believed.")
+        if driver == "polargraph":
+            try:
+                geom = geometry(entry)
+            except ValueError as exc:
+                raise ValueError(f"{path}: {name}: {exc}") from None
+            if [round(v, 3) for v in geom.travel] != [round(float(v), 3)
+                                                     for v in travel]:
+                raise ValueError(
+                    f"{path}: {name} says travel {travel} but its rig "
+                    f"{entry['rig']!r} is {list(geom.travel)}. One of them is "
+                    f"wrong, and plotting against the wrong one puts the "
+                    f"drawing in the wrong place with nothing reported.")
         e = dict(entry)
         e["name"] = name
         e["driver"] = driver
