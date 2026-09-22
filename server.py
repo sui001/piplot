@@ -419,7 +419,11 @@ def preflight(port):
         # problem surfaces there where it can be reported against a real job.
         out.append({"label": "machine is ready", "ok": True,
                     "detail": f"{chosen['label']} ({chosen['driver']}), not "
-                              f"probed: opening this board's port resets it"})
+                              + ("probed here: the worker's own connect checks "
+                                 "it is FluidNC, and refuses if opening the "
+                                 "port reset it"
+                                 if chosen["driver"] == "polargraph" else
+                                 "probed: opening this board's port resets it")})
         return True, out, chosen
 
     try:
