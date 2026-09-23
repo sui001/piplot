@@ -16,7 +16,8 @@ import re
 import sys
 
 from polargraph import (Polargraph, belt_length_mm, fluidnc_frame,
-                        max_segment_length, stairwell, whiteboard)
+                        max_segment_length, min_drop_mm, rig_report, stairwell,
+                        whiteboard)
 
 YAML = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                     "fluidnc-polargraph-bench.yaml")
@@ -150,6 +151,46 @@ def main() -> int:
         require(hit is refuses,
                 f"at a {drop:.0f} mm drop a 1600 mm span "
                 f"{'does' if refuses else 'does not'} refuse a corner")
+
+    print(NL + "rig_report: what the setup page will show while holding a tape")
+    rep = rig_report(bench)
+    require(rep["refusals"] == [] and rep["usable_fraction"] == 1.0,
+            "the bench rig reports no refusals and all of the sheet usable")
+    require(abs(rep["min_angle_deg"] - 28.1) < 0.2,
+            f"worst cord angle {rep['min_angle_deg']:.1f} deg, well over the "
+            f"{rep['min_angle_floor']:.0f} deg floor")
+
+    # min_drop_mm is only meaningful if it is really the EDGE: legal at that
+    # height, refused just below it. Otherwise it is a number people would
+    # hang a beam by for no reason.
+    for span, sheet in ((940.0, (930.0, 1500.0)), (1500.0, (930.0, 1500.0)),
+                        (1500.0, (420.0, 594.0))):
+        d = min_drop_mm(span, sheet)
+        w, h = sheet
+        corners = [(0.0, 0.0), (w, 0.0), (0.0, h), (w, h)]
+        at = Polargraph(span=span, travel=sheet, origin=((span - w) / 2.0, d))
+        below = Polargraph(span=span, travel=sheet, origin=((span - w) / 2.0, d - 10.0))
+        require(all(not at.check([c]) for c in corners)
+                and any(below.check([c]) for c in corners),
+                f"span {span:.0f} on {w:.0f}x{h:.0f}: {d:.0f} mm of drop is the "
+                f"edge, legal at it and refused 10 mm under it")
+
+    drops = [min_drop_mm(s, (930.0, 1500.0)) for s in (940.0, 1200.0, 1500.0)]
+    note(f"drop needed goes {' -> '.join(f'{d:.0f}' for d in drops)} mm as the "
+         "span goes 940 -> 1200 -> 1500 mm")
+    require(all(b > a for a, b in zip(drops, drops[1:])),
+            "a wider span always needs more clearance above the paper, which "
+            "is why the setup page has to compute it rather than print a rule")
+
+    bad = Polargraph(span=1500.0, travel=(930.0, 1500.0), origin=(285.0, 200.0))
+    br = rig_report(bad)
+    require(br["refusals"] and br["min_drop_mm"] > bad.origin[1],
+            f"a 1500 mm span with only 200 mm of drop is refused ({len(br['refusals'])} "
+            f"corners) and told to move to {br['min_drop_mm']:.0f} mm")
+    fixed = Polargraph(span=1500.0, travel=(930.0, 1500.0),
+                       origin=(285.0, br["min_drop_mm"]))
+    require(rig_report(fixed)["refusals"] == [],
+            "and at the height it suggests, the same rig is legal")
 
     print(NL + "belt, which is the one part that might not be in a drawer")
     b = belt_length_mm(bench)

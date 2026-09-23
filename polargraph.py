@@ -413,3 +413,82 @@ def belt_length_mm(m: Polargraph, pulley_teeth: int = 20, pitch: float = 2.0,
         "tail_at_furthest": tail_min,
         "tail_at_closest": per_side - shortest - wrap - clamp,
     }
+
+
+def min_drop_mm(span: float, sheet: Tuple[float, float],
+                min_angle: float = MIN_CORD_ANGLE_DEG,
+                step: float = 5.0, limit: float = 3000.0) -> float | None:
+    """The least clearance above the paper that keeps every corner legal.
+
+    The number to hold a tape measure against when hanging the beam. A wider
+    span needs more: the far cord lies flatter at the top corners, and height
+    above the paper is what lifts it back up.
+    """
+    w, h = sheet
+    drop = step
+    while drop <= limit:
+        m = Polargraph(span=span, travel=(w, h), origin=((span - w) / 2.0, drop),
+                       min_cord_angle_deg=min_angle)
+        if all(not m.check([c]) for c in ((0.0, 0.0), (w, 0.0), (0.0, h), (w, h))):
+            return drop
+        drop += step
+    return None
+
+
+def rig_report(m: Polargraph, samples: int = 15) -> dict:
+    """Everything worth knowing about a rig, from its geometry alone.
+
+    Pure arithmetic, no hardware: this is what the setup page shows while
+    someone is still holding a tape measure, and what a claim can be written
+    against. Every length is mm, every angle degrees, force newtons.
+
+    `refusals` is the honest bottom line: empty means every corner and edge
+    of the paper can actually be drawn.
+    """
+    w, h = m.travel
+    n = max(3, samples)
+    edges = [(w * i / (n - 1), h * j / (n - 1)) for i in range(n) for j in range(n)]
+    corners = [(0.0, 0.0), (w, 0.0), (0.0, h), (w, h)]
+
+    angles = [min(m.cord_angle_deg(*p)) for p in edges]
+    cords = [m.inverse(*p) for p in edges]
+    longest = max(max(c) for c in cords)
+    shortest = min(min(c) for c in cords)
+
+    weight = m.gondola_g / 1000.0 * 9.81
+    tensions = [(weight / 2.0) / math.sin(math.radians(a)) for a in angles]
+    belt = belt_length_mm(m)
+    ok_edges = sum(1 for p in edges if not m.check([p]))
+
+    refusals = []
+    for label, p in (("top left", corners[0]), ("top right", corners[1]),
+                     ("bottom left", corners[2]), ("bottom right", corners[3])):
+        for r in m.check([p]):
+            refusals.append(f"{label}: {r}")
+
+    return {
+        "span": m.span,
+        "drop": m.origin[1],
+        "sheet": [w, h],
+        "gondola_g": m.gondola_g,
+        "min_angle_deg": min(angles),
+        "min_angle_floor": m.min_cord_angle_deg,
+        "min_drop_mm": min_drop_mm(m.span, (w, h), m.min_cord_angle_deg),
+        "usable_fraction": ok_edges / len(edges),
+        "longest_cord": longest,
+        "shortest_cord": shortest,
+        "belt_per_side": belt["per_side"],
+        "belt_total": belt["total"],
+        "tail_at_closest": belt["tail_at_closest"],
+        "peak_tension_n": max(tensions),
+        "min_tension_n": min(tensions),
+        "tail_weight_max_g": min(tensions) / 9.81 * 1000.0,
+        "torque_20t_ncm": max(tensions) * (20 * 2.0 / (2 * math.pi)) / 1000.0 * 100.0,
+        "segment_length_mm": max_segment_length(m, 0.1),
+        "bow_unsegmented_mm": m.bow((0.0, h / 2.0), (w, h / 2.0)),
+        "worst_sag_mm": max(m.sag_error_mm(*p) for p in edges),
+        "wall_width": m.span + 200.0,
+        "wall_height": m.origin[1] + h,
+        "fluidnc": fluidnc_frame(m),
+        "refusals": refusals,
+    }

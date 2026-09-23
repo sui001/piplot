@@ -707,6 +707,76 @@ def info():
     })
 
 
+@app.get("/api/rig")
+def rig_current():
+    """The polargraph's geometry as configured, with everything derived from it.
+
+    Read only. The numbers here are what /setup.html starts from, so someone
+    with a tape measure can see what the machine currently believes before
+    changing anything.
+    """
+    import polargraph
+
+    for name, entry in sorted(machines.load().items()):
+        if entry["driver"] != "polargraph":
+            continue
+        geom = machines.geometry(entry)
+        return jsonify({"ok": True, "machine": name, "rig": entry.get("rig"),
+                        "report": polargraph.rig_report(geom)})
+    return jsonify({"ok": False, "message": "no polargraph in machines.json"}), 404
+
+
+# What a human could plausibly build, in mm. Outside these something has been
+# typed wrong, and a refusal naming the bound is kinder than a report full of
+# nonsense.
+RIG_BOUNDS = {"span": (200.0, 6000.0), "drop": (0.0, 4000.0),
+              "sheet_w": (50.0, 5000.0), "sheet_h": (50.0, 12000.0),
+              "gondola_g": (50.0, 5000.0)}
+
+
+@app.post("/api/rig/check")
+def rig_check():
+    """Score a proposed rig. Changes nothing, moves nothing, writes nothing.
+
+    This is the arithmetic that decides whether a beam hung at a given height
+    can actually draw the corners of a given sheet. It refuses rather than
+    warns, the same as every other check here, because a rig that cannot
+    reach its own corners produces a drawing that looks plausible and is
+    wrong at the edges.
+    """
+    import polargraph
+
+    body = request.get_json(force=True) or {}
+    vals, errors = {}, []
+    for key, (lo, hi) in RIG_BOUNDS.items():
+        raw = body.get(key)
+        try:
+            v = float(raw)
+        except (TypeError, ValueError):
+            errors.append(f"{key}: {raw!r} is not a number")
+            continue
+        if not (lo <= v <= hi):
+            errors.append(f"{key}: {v:g} mm is outside {lo:g} to {hi:g}")
+            continue
+        vals[key] = v
+    if errors:
+        return jsonify({"ok": False, "errors": errors}), 400
+
+    if vals["span"] < vals["sheet_w"]:
+        errors.append(f"the anchors ({vals['span']:g} mm apart) are narrower "
+                      f"than the paper ({vals['sheet_w']:g} mm). The gondola "
+                      f"cannot go outside its own anchors, so the sheet edges "
+                      f"are unreachable whatever the height.")
+
+    geom = polargraph.Polargraph(
+        span=vals["span"], travel=(vals["sheet_w"], vals["sheet_h"]),
+        origin=((vals["span"] - vals["sheet_w"]) / 2.0, vals["drop"]),
+        gondola_g=vals["gondola_g"])
+    report = polargraph.rig_report(geom)
+    return jsonify({"ok": not errors and not report["refusals"],
+                    "errors": errors, "report": report})
+
+
 @app.get("/api/boards")
 def boards():
     return jsonify({"boards": list_boards()})

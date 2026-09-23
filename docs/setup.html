@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>polargraph setup</title>
+<style>
+  :root {
+    --ink: #101014; --panel: #ffffff; --page: #eceae4;
+    --line: #c9c6bd; --accent: #1d4ed8; --good: #0f6e56; --bad: #a32d2d;
+    --warn: #8a5a00;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 15px/1.5 system-ui, -apple-system, sans-serif;
+         background: var(--page); color: var(--ink); }
+  header { background: var(--ink); color: #fff; padding: 10px 16px;
+           display: flex; gap: 16px; align-items: baseline; flex-wrap: wrap; }
+  header h1 { font-size: 17px; margin: 0; font-weight: 600; }
+  header .host { color: #fbbf24; font-weight: 600; }
+  header a { color: #7dd3fc; font-weight: 600; text-decoration: none; }
+  main { display: grid; grid-template-columns: 340px 1fr; gap: 16px; padding: 16px;
+         align-items: start; }
+  @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
+  .panel { background: var(--panel); border: 1px solid var(--line);
+           border-radius: 10px; padding: 14px; margin-bottom: 16px; }
+  .panel h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .08em;
+              margin: 0 0 10px; color: #333; }
+  .row { display: grid; grid-template-columns: 1fr 96px 34px; gap: 8px;
+         align-items: center; margin-bottom: 8px; }
+  .row label { font-size: 14px; font-weight: 500; }
+  .row .unit { font-size: 13px; color: #555; }
+  input[type=number] { width: 100%; padding: 6px 8px; font: inherit;
+                       border: 1px solid var(--line); border-radius: 6px;
+                       font-variant-numeric: tabular-nums; }
+  input:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .presets { display: flex; gap: 6px; flex-wrap: wrap; margin: 4px 0 12px; }
+  .presets button, .act { font: inherit; padding: 5px 10px; border-radius: 6px;
+            border: 1px solid var(--line); background: #f7f6f3; cursor: pointer; }
+  .presets button:hover, .act:hover { background: #ebe9e3; }
+  .verdict { padding: 12px 14px; border-radius: 10px; font-weight: 600;
+             margin-bottom: 14px; border: 2px solid; }
+  .verdict.ok  { color: var(--good); border-color: var(--good); background: #e8f5f0; }
+  .verdict.no  { color: var(--bad);  border-color: var(--bad);  background: #fbecec; }
+  .verdict small { display: block; font-weight: 400; color: var(--ink);
+                   margin-top: 4px; }
+  ul.why { margin: 8px 0 0; padding-left: 18px; }
+  ul.why li { color: var(--bad); font-size: 14px; margin-bottom: 4px; }
+  table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }
+  td { padding: 4px 0; font-size: 14px; border-bottom: 1px solid #eee; }
+  td.k { color: #333; }
+  td.v { text-align: right; font-weight: 600; }
+  td.n { color: #555; font-weight: 400; font-size: 13px; text-align: right; }
+  .hint { font-size: 13px; color: #444; margin-top: 10px; }
+  svg { width: 100%; height: auto; background: #faf9f6; border-radius: 8px;
+        border: 1px solid var(--line); }
+</style>
+</head>
+<body>
+<header>
+  <h1>polargraph setup</h1>
+  <span class="host" id="host">&nbsp;</span>
+  <a href="/">plotting page</a>
+</header>
+
+<main>
+  <div>
+    <div class="panel">
+      <h2>the rig, as measured</h2>
+      <div class="presets" id="presets"></div>
+      <div class="row"><label for="span">anchors apart</label>
+        <input type="number" id="span" step="5"><span class="unit">mm</span></div>
+      <div class="row"><label for="drop">clear above paper</label>
+        <input type="number" id="drop" step="5"><span class="unit">mm</span></div>
+      <div class="row"><label for="sheet_w">paper width</label>
+        <input type="number" id="sheet_w" step="5"><span class="unit">mm</span></div>
+      <div class="row"><label for="sheet_h">paper height</label>
+        <input type="number" id="sheet_h" step="5"><span class="unit">mm</span></div>
+      <div class="row"><label for="gondola_g">gondola mass</label>
+        <input type="number" id="gondola_g" step="50"><span class="unit">g</span></div>
+      <button class="act" id="load">read the machine</button>
+      <p class="hint">Measure between the two anchor points, and from the top
+      edge of the paper up to that line. Nothing here moves the machine.</p>
+    </div>
+
+    <div class="panel">
+      <h2>what to build</h2>
+      <table id="build"></table>
+    </div>
+  </div>
+
+  <div>
+    <div id="verdict" class="verdict ok">checking…</div>
+    <div class="panel">
+      <h2>side view, to scale</h2>
+      <svg id="sketch" viewBox="0 0 640 420" role="img" aria-label="scale drawing of the rig"></svg>
+    </div>
+    <div class="panel">
+      <h2>what it costs</h2>
+      <table id="costs"></table>
+      <p class="hint" id="apply-note">Applying this to the machine is not wired
+      up yet: these numbers are the measurement, not the change. Tell Claude the
+      span and the clearance and the config gets rebuilt and uploaded.</p>
+    </div>
+  </div>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+const F = ["span", "drop", "sheet_w", "sheet_h", "gondola_g"];
+const PRESETS = {
+  "whiteboard 930 x 1500": [930, 1500], "A0 841 x 1189": [841, 1189],
+  "A1 594 x 841": [594, 841], "A2 420 x 594": [420, 594],
+};
+const mm = v => v === null || v === undefined ? "n/a" : Math.round(v) + " mm";
+const m2 = v => (v / 1000).toFixed(2) + " m";
+
+function rows(table, items) {
+  table.innerHTML = items.map(([k, v, note]) =>
+    `<tr><td class="k">${k}</td><td class="v">${v}</td>` +
+    `<td class="n">${note || ""}</td></tr>`).join("");
+}
+
+function sketch(r) {
+  // Side view: the anchor line, the paper hanging below it, and the two cords
+  // to whichever corner is worst. Drawn to scale so a bad rig looks bad.
+  const W = r.span + 400, H = r.drop + r.sheet[1] + 200;
+  const s = Math.min(600 / W, 380 / H), ox = (640 - r.span * s) / 2, oy = 30;
+  const ax = ox, bx = ox + r.span * s;
+  const px = ox + (r.span - r.sheet[0]) / 2 * s, py = oy + r.drop * s;
+  const pw = r.sheet[0] * s, ph = r.sheet[1] * s;
+  const worstY = oy, corner = [px, py];              // top left corner is worst
+  const col = r.refusals.length ? "#a32d2d" : "#0f6e56";
+  $("sketch").innerHTML = `
+    <line x1="${ax}" y1="${oy}" x2="${bx}" y2="${oy}" stroke="#101014" stroke-width="3"/>
+    <circle cx="${ax}" cy="${oy}" r="5" fill="#1d4ed8"/>
+    <circle cx="${bx}" cy="${oy}" r="5" fill="#1d4ed8"/>
+    <text x="${(ax + bx) / 2}" y="${oy - 10}" text-anchor="middle" font-size="13"
+          font-family="system-ui" fill="#101014">${Math.round(r.span)} mm apart</text>
+    <rect x="${px}" y="${py}" width="${pw}" height="${ph}" fill="#fff"
+          stroke="#101014" stroke-width="2"/>
+    <text x="${px + pw / 2}" y="${py + ph + 18}" text-anchor="middle" font-size="13"
+          font-family="system-ui" fill="#101014">
+      ${Math.round(r.sheet[0])} x ${Math.round(r.sheet[1])} mm</text>
+    <line x1="${ax}" y1="${oy}" x2="${corner[0]}" y2="${corner[1]}"
+          stroke="${col}" stroke-width="2"/>
+    <line x1="${bx}" y1="${oy}" x2="${corner[0]}" y2="${corner[1]}"
+          stroke="${col}" stroke-width="2"/>
+    <text x="${ox + 8}" y="${oy + (py - oy) / 2 + 4}" font-size="13"
+          font-family="system-ui" fill="#101014">${Math.round(r.drop)} mm clear</text>
+    <text x="${corner[0] + 8}" y="${corner[1] - 8}" font-size="13"
+          font-family="system-ui" fill="${col}" font-weight="600">
+      worst corner ${r.min_angle_deg.toFixed(1)}&#176;</text>`;
+}
+
+function show(data) {
+  const r = data.report, v = $("verdict");
+  const bad = (data.errors || []).concat(r ? r.refusals : []);
+  if (!r) {
+    v.className = "verdict no";
+    v.innerHTML = "cannot check this<ul class='why'>" +
+      bad.map(e => `<li>${e}</li>`).join("") + "</ul>";
+    return;
+  }
+  if (bad.length) {
+    v.className = "verdict no";
+    v.innerHTML = `this rig cannot draw its own corners` +
+      `<small>Worst cord is ${r.min_angle_deg.toFixed(1)}&#176; off horizontal, ` +
+      `under the ${r.min_angle_floor}&#176; floor. ` +
+      (r.min_drop_mm ? `Hang it <b>${mm(r.min_drop_mm)}</b> above the paper and it works.`
+                     : `No height fixes this span and sheet.`) + `</small>` +
+      "<ul class='why'>" + bad.slice(0, 4).map(e => `<li>${e}</li>`).join("") + "</ul>";
+  } else {
+    v.className = "verdict ok";
+    v.innerHTML = `every corner of this sheet can be drawn` +
+      `<small>Worst cord ${r.min_angle_deg.toFixed(1)}&#176; off horizontal, ` +
+      `against a ${r.min_angle_floor}&#176; floor. Minimum clearance for this ` +
+      `span and sheet is ${mm(r.min_drop_mm)}.</small>`;
+  }
+  rows($("build"), [
+    ["belt, per side", m2(r.belt_per_side), "cut both the same"],
+    ["belt, total", m2(r.belt_total), ""],
+    ["clear space under each motor", m2(r.tail_at_closest), "for the tail"],
+    ["wall width needed", m2(r.wall_width), "anchors plus mounts"],
+    ["wall height, anchors to paper bottom", m2(r.wall_height), ""],
+    ["tail weight, maximum", Math.round(r.tail_weight_max_g) + " g",
+     "heavier lifts the gondola"],
+  ]);
+  rows($("costs"), [
+    ["worst cord angle", r.min_angle_deg.toFixed(1) + "&#176;",
+     "floor is " + r.min_angle_floor + "&#176;"],
+    ["minimum clearance", mm(r.min_drop_mm), "for this span and sheet"],
+    ["sheet reachable", Math.round(r.usable_fraction * 100) + "%", ""],
+    ["peak cord tension", r.peak_tension_n.toFixed(1) + " N",
+     r.torque_20t_ncm.toFixed(1) + " N.cm at a 20T pulley"],
+    ["longest cord", m2(r.longest_cord), ""],
+    ["segment length for the board", mm(r.segment_length_mm),
+     "keeps the bow under 0.1 mm"],
+    ["bow if nobody segmented", mm(r.bow_unsegmented_mm), "why that matters"],
+    ["worst sag error", r.worst_sag_mm.toFixed(2) + " mm", "with this gondola"],
+    ["anchors, in the board's frame",
+     `${Math.round(r.fluidnc.left_anchor_x)}, ${Math.round(r.fluidnc.left_anchor_y)}` +
+     ` / ${Math.round(r.fluidnc.right_anchor_x)}, ${Math.round(r.fluidnc.right_anchor_y)}`,
+     "goes in the FluidNC config"],
+  ]);
+  sketch(r);
+}
+
+let timer = null;
+function check() {
+  clearTimeout(timer);
+  timer = setTimeout(async () => {
+    const body = {};
+    F.forEach(k => body[k] = parseFloat($(k).value));
+    const res = await fetch("/api/rig/check", {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(body)});
+    show(await res.json());
+  }, 250);
+}
+
+async function loadCurrent() {
+  const res = await fetch("/api/rig");
+  if (!res.ok) { $("host").textContent = "no polargraph configured"; return; }
+  const d = await res.json(), r = d.report;
+  $("host").textContent = d.machine + (d.rig ? " (" + d.rig + ")" : "");
+  $("span").value = Math.round(r.span);
+  $("drop").value = Math.round(r.drop);
+  $("sheet_w").value = Math.round(r.sheet[0]);
+  $("sheet_h").value = Math.round(r.sheet[1]);
+  $("gondola_g").value = Math.round(r.gondola_g);
+  check();
+}
+
+$("presets").innerHTML = Object.keys(PRESETS)
+  .map(k => `<button data-k="${k}">${k}</button>`).join("");
+$("presets").onclick = e => {
+  const k = e.target.dataset.k;
+  if (!k) return;
+  $("sheet_w").value = PRESETS[k][0];
+  $("sheet_h").value = PRESETS[k][1];
+  check();
+};
+F.forEach(k => $(k).addEventListener("input", check));
+$("load").onclick = loadCurrent;
+loadCurrent();
+</script>
+</body>
+</html>
