@@ -174,6 +174,11 @@ axes:
   # G1 Y+ (gondola up) turns them OPPOSITE ways, G1 X+ (right) turns them
   # the SAME way, which is what winding in both cords, and letting one out
   # while taking one in, look like. No :low on either direction pin.
+  #
+  # 25 Sep, after the rewiring on the wall: a lift LOWERED the gondola, both
+  # motors together and quiet, so the new wiring reversed both. Fixed here
+  # with :low on BOTH direction pins rather than re-soldering. If the motor
+  # wiring is ever redone, re-check with a 10 mm lift first.
   x:
     steps_per_mm: 80.000
     max_rate_mm_per_min: 6000.000      # 100 mm/s, plenty for ink
@@ -188,7 +193,7 @@ axes:
       pulloff_mm: 1.000
       stepstick:
         step_pin: gpio.32
-        direction_pin: gpio.33
+        direction_pin: gpio.33:low
 
   # ---- y: the RIGHT cord's length ----------------------------------------
   y:
@@ -205,7 +210,7 @@ axes:
       pulloff_mm: 1.000
       stepstick:
         step_pin: gpio.25
-        direction_pin: gpio.26
+        direction_pin: gpio.26:low
 
   # ---- z: the pen servo ---------------------------------------------------
   # Z0 is down, Z5 is up, same shape as suidraw-0 so piplot's Grbl pen logic
