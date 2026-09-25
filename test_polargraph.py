@@ -15,9 +15,9 @@ import os
 import re
 import sys
 
-from polargraph import (Polargraph, belt_length_mm, fluidnc_frame,
-                        max_segment_length, min_drop_mm, rig_report, stairwell,
-                        whiteboard)
+from polargraph import (Polargraph, belt_length_mm, bench as mounted_rig,
+                        fluidnc_frame, max_segment_length, min_drop_mm,
+                        rig_report, stairwell, whiteboard)
 
 YAML = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                     "fluidnc-polargraph-bench.yaml")
@@ -220,14 +220,15 @@ def main() -> int:
             hit = re.search(rf"^\s*{name}:\s*(-?[\d.]+)", text, re.M)
             return float(hit.group(1)) if hit else None
 
-        want = fluidnc_frame(bench)
+        mounted = mounted_rig()
+        want = fluidnc_frame(mounted)
         for k in ("left_anchor_x", "left_anchor_y",
                   "right_anchor_x", "right_anchor_y"):
             require(key(k) is not None and abs(key(k) - want[k]) < 1e-6,
                     f"config {k} is {key(k)}, model says {want[k]}")
 
         seg = key("segment_length")
-        cap = max_segment_length(bench, 0.1)
+        cap = max_segment_length(mounted, 0.1)
         require(seg is not None and seg <= cap,
                 f"config segment_length {seg} mm is at or under the "
                 f"{cap:.1f} mm that holds the bow to 0.1 mm")

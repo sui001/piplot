@@ -296,6 +296,31 @@ def whiteboard(span: float = 940.0,
                       origin=((span - board[0]) / 2.0, drop), **kw)
 
 
+def bench(span: float = 1370.0,
+          sheet: Tuple[float, float] = (930.0, 1060.0),
+          drop: float = 440.0, **kw) -> Polargraph:
+    """The bench rig AS MOUNTED, measured 25 Sep 2026. Not the ideal one.
+
+    `whiteboard()` is the design reference the sweeps compare against (940 mm
+    span, 500 mm above the board). This is what is actually on the wall: the
+    3030 rail went up with a 1370 mm span between the points where the belts
+    leave the pulleys, centred on the board, with that belt line LEVEL with
+    the top of the whiteboard's usable area.
+
+    At 1370 mm the paper's top edge must sit at least 420 mm below the
+    anchors or its top corners go past the 20 degree cord floor, so the top
+    440 mm of the board is left out and the drawable sheet is the lower
+    930 x 1060 of it. Every corner of that passes (worst 20.9 degrees). Raise
+    the rail and the band comes back: rerun min_drop_mm, change these three
+    numbers, regenerate the config.
+
+    This is the rig the FluidNC config and machines.json on polarpi describe,
+    and the claims check the config against this, not against the ideal.
+    """
+    return Polargraph(span=span, travel=sheet,
+                      origin=((span - sheet[0]) / 2.0, drop), **kw)
+
+
 def stairwell(span: float = 2500.0,
               sheet: Tuple[float, float] = (2200.0, 8500.0),
               drop: float = 300.0, gondola_g: float = 1500.0,

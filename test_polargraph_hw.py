@@ -76,7 +76,16 @@ def main() -> int:
         print(__doc__)
         return 2
     port = sys.argv[1]
-    geom = polargraph.whiteboard()
+    # The rig machines.json says is mounted, so the test exercises the real
+    # geometry. Falls back to the design reference off the Pi.
+    import machines
+    try:
+        entry = next(e for e in machines.load().values() if e["driver"] == "polargraph")
+        geom = machines.geometry(entry)
+    except Exception:
+        geom = polargraph.whiteboard()
+    print(f"rig: span {geom.span:.0f}, sheet {geom.travel[0]:.0f} x {geom.travel[1]:.0f}, "
+          f"{geom.origin[1]:.0f} mm below the anchors")
 
     print(f"\n1. opening {port} does not reset the board")
     g = plotter.Polargraph(geom, serial_port=port)

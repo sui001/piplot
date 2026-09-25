@@ -46,7 +46,7 @@ DRIVERS = ("axidraw", "grbl", "polargraph")
 # polargraph.py instead of trusting a bare travel. The rig carries the anchor
 # span, the drop and the paper, which is what check() needs to refuse the dead
 # corners. Optional per-entry overrides: span, drop, gondola_g.
-POLAR_RIGS = ("whiteboard", "stairwell")
+POLAR_RIGS = ("bench", "whiteboard", "stairwell")
 
 
 def geometry(entry: dict):

@@ -1,6 +1,6 @@
 board: ESP32 WROOM devkit (ESP32-D0WD-V3, 4 MB)
-name: polargraph bench rig, portrait whiteboard 930 x 1500 usable
-meta: gen3d / Cybernetic Garden. Generated against polargraph.whiteboard().
+name: polargraph bench rig as mounted, 1370 span, drawable 930 x 1060
+meta: gen3d / Cybernetic Garden. Generated against polargraph.bench(), the rig as mounted.
 
 # ---------------------------------------------------------------------------
 # Read this before flashing.
@@ -11,8 +11,11 @@ meta: gen3d / Cybernetic Garden. Generated against polargraph.whiteboard().
 # sitting at power on.
 #
 # So the startup ritual is: park the gondola on the cross marked at the CENTRE
-# of the whiteboard, then power the board. That spot is cartesian (0, 0).
+# of the drawable area, then power the board. That spot is cartesian (0, 0).
 # Get it wrong and every coordinate is wrong, with nothing reported.
+#
+# AS MOUNTED 25 Sep: that cross is centred on the board, 970 mm below the
+# line where the belts leave the pulleys.
 #
 # Park at the centre rather than a corner because it is the easiest point to
 # measure to with a tape from two edges, and because an error there is shared
@@ -23,11 +26,20 @@ meta: gen3d / Cybernetic Garden. Generated against polargraph.whiteboard().
 # anchor. The guard is polargraph.Polargraph.check() on the Pi, exactly as it
 # is for suidraw-0, and it is the only guard there is.
 #
-# Geometry, all from polargraph.whiteboard():
-#   board 1100 x 1700 mm physically, 930 x 1500 mm usable. PORTRAIT.
-#   anchors 940 mm apart, 500 mm above the top of the usable area
-#   park point = centre of the usable area, so it spans x -465..465,
-#     y -750..750, and the anchors sit at (-470, +1250) and (+470, +1250)
+# Geometry AS MOUNTED, measured 25 Sep, from polargraph.bench():
+#   board 1100 x 1700 mm physically, 930 x 1500 mm usable, PORTRAIT
+#   rail up with 1370 mm between the points where the belts leave the
+#     pulleys, centred on the board, that belt line LEVEL with the top of
+#     the usable area (0 mm clearance)
+#   at 1370 mm the paper's top must sit 420 mm below the anchors, so the
+#     top 440 mm of the board is left out: drawable is 930 x 1060, starting
+#     440 mm below the anchors. Worst corner 20.9 deg, every corner passes
+#   park point = centre of that area, 970 mm below the belt line, so the
+#     anchors sit at (-685, +970) and (+685, +970) in FluidNC's frame
+#
+# Raise the rail and the band comes back: min_drop_mm() says how far, then
+# change polargraph.bench() and regenerate. The IDEAL rig, which the design
+# notes below argue for, was 940 mm apart and 500 mm above the board:
 #
 # Neither number is a guess, and both are counterintuitive.
 #
@@ -85,11 +97,11 @@ stepping:
 kinematics:
   WallPlotter:
     left_axis: 0
-    left_anchor_x: -470.000
-    left_anchor_y: 1250.000
+    left_anchor_x: -685.000
+    left_anchor_y: 970.000
     right_axis: 1
-    right_anchor_x: 470.000
-    right_anchor_y: 1250.000
+    right_anchor_x: 685.000
+    right_anchor_y: 970.000
 
     # A straight line on the paper is NOT a straight line in cord space, and
     # this is the number that hides the difference. Unsegmented, a line
