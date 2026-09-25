@@ -321,6 +321,18 @@ def bench(span: float = 1370.0,
                       origin=((span - sheet[0]) / 2.0, drop), **kw)
 
 
+# Where the bench rig takes its zero: the gondola RESTING on the whiteboard's
+# bottom tray, centred, 1470 mm below the belt line, which is paper point
+# (465, 1030) on the drawable sheet above.
+#
+# A rest point rather than a marked cross, since 25 Sep. FluidNC derives its
+# zero at boot and releases the motors while it restarts. With a hung gondola
+# and tail weights that means a fall: on 25 Sep a config upload and a motor
+# disable both dropped it to the floor. A gondola already sitting at its
+# lowest point cannot fall, so every restart is safe with nobody holding it.
+BENCH_REST: Point = (465.0, 1030.0)
+
+
 def stairwell(span: float = 2500.0,
               sheet: Tuple[float, float] = (2200.0, 8500.0),
               drop: float = 300.0, gondola_g: float = 1500.0,

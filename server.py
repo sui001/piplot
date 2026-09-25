@@ -463,8 +463,10 @@ def grbl_worker(job, paths, entry):
     # refuses for exactly that reason, so it is simply not called.
     polar = entry["driver"] == "polargraph"
     if polar:
+        home = entry.get("home")
         g = Polargraph(machines.geometry(entry),
                        serial_port=job.device,
+                       home=tuple(home) if home else None,
                        feed=int(entry.get("feed", 3000)),
                        pen_up_z=float(entry.get("pen_up_z", 5.0)),
                        pen_down_z=float(entry.get("pen_down_z", 0.0)),

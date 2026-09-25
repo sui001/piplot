@@ -15,7 +15,7 @@ import os
 import re
 import sys
 
-from polargraph import (Polargraph, belt_length_mm, bench as mounted_rig,
+from polargraph import (BENCH_REST, Polargraph, belt_length_mm, bench as mounted_rig,
                         fluidnc_frame, max_segment_length, min_drop_mm,
                         rig_report, stairwell, whiteboard)
 
@@ -221,7 +221,7 @@ def main() -> int:
             return float(hit.group(1)) if hit else None
 
         mounted = mounted_rig()
-        want = fluidnc_frame(mounted)
+        want = fluidnc_frame(mounted, BENCH_REST)
         for k in ("left_anchor_x", "left_anchor_y",
                   "right_anchor_x", "right_anchor_y"):
             require(key(k) is not None and abs(key(k) - want[k]) < 1e-6,

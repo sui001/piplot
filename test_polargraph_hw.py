@@ -82,13 +82,14 @@ def main() -> int:
     try:
         entry = next(e for e in machines.load().values() if e["driver"] == "polargraph")
         geom = machines.geometry(entry)
+        home = tuple(entry["home"]) if entry.get("home") else None
     except Exception:
-        geom = polargraph.whiteboard()
+        geom, home = polargraph.whiteboard(), None
     print(f"rig: span {geom.span:.0f}, sheet {geom.travel[0]:.0f} x {geom.travel[1]:.0f}, "
           f"{geom.origin[1]:.0f} mm below the anchors")
 
     print(f"\n1. opening {port} does not reset the board")
-    g = plotter.Polargraph(geom, serial_port=port)
+    g = plotter.Polargraph(geom, serial_port=port, home=home)
     g.connect()
     require(True, "connected, identified as FluidNC, no boot banner on open")
     start = settle(g)
@@ -104,7 +105,7 @@ def main() -> int:
     g.sp = None
     time.sleep(1.0)
 
-    g2 = plotter.Polargraph(geom, serial_port=port)
+    g2 = plotter.Polargraph(geom, serial_port=port, home=home)
     try:
         g2.connect()
     except RuntimeError as exc:
@@ -138,7 +139,7 @@ def main() -> int:
     g2.disconnect()                    # lifts and returns to the park point
     time.sleep(0.5)
 
-    g3 = plotter.Polargraph(geom, serial_port=port)
+    g3 = plotter.Polargraph(geom, serial_port=port, home=home)
     g3.connect()
     home = settle(g3)
     require(abs(home[0]) < 0.05 and abs(home[1]) < 0.05,
