@@ -31,7 +31,7 @@ import machines  # noqa: E402  which machines exist, and how to find them
 from pen_box import MODELS  # noqa: E402  the AxiDraw travel envelopes
 from portlock import hold  # noqa: E402  one thing at a time on a port
 
-VERSION = "0.10.0"
+VERSION = "0.10.1"
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DOCS = os.path.join(HERE, "docs")
@@ -1106,22 +1106,63 @@ def plot():
                     "segments": job.total})
 
 
-def default_host() -> str:
+def tailnet_ip() -> str | None:
+    """The tailnet IPv4 address, or None if Tailscale has not assigned one."""
+    try:
+        out = subprocess.run(["tailscale", "ip", "-4"], capture_output=True,
+                             text=True, timeout=5)
+        addr = out.stdout.strip().splitlines()[0].strip()
+        if addr and ipaddress.ip_address(addr) in TAILNET[0]:
+            return addr
+    except Exception:
+        pass
+    return None
+
+
+def default_host(wait: float = 90.0) -> str:
     """Bind the tailnet address when there is one.
 
     Binding 0.0.0.0 on campus wireless puts a plotter control panel in front of
     everyone on the subnet. The tailnet is already the way in, so default to it
     and make the wider bind an explicit choice.
+
+    At boot the service can start before Tailscale has an address (After=
+    tailscaled.service only means the daemon started). Falling straight back
+    to loopback then leaves the tailnet with connection refused and makes
+    every local client look like a Funnel visitor, so wait for it first.
     """
-    try:
-        out = subprocess.run(["tailscale", "ip", "-4"], capture_output=True,
-                             text=True, timeout=5)
-        addr = out.stdout.strip().splitlines()[0]
+    deadline = time.monotonic() + wait
+    said = False
+    while True:
+        addr = tailnet_ip()
         if addr:
+            if said:
+                print(f"tailnet address {addr} arrived", flush=True)
             return addr
-    except Exception:
-        pass
-    return "127.0.0.1"
+        if time.monotonic() >= deadline:
+            print(f"WARNING: no tailnet address after {wait:.0f} s, "
+                  "binding loopback only. Tailnet clients will be refused; "
+                  "restart piplot once Tailscale is up.", flush=True)
+            return "127.0.0.1"
+        if not said:
+            print(f"waiting up to {wait:.0f} s for a tailnet address...",
+                  flush=True)
+            said = True
+        time.sleep(2)
+
+
+def bind(host: str, port: int, wait: float = 30.0):
+    """make_server, retrying while the address is not on an interface yet."""
+    deadline = time.monotonic() + wait
+    from werkzeug.serving import make_server
+    while True:
+        try:
+            return make_server(host, port, app, threaded=True)
+        except OSError as e:
+            if time.monotonic() >= deadline:
+                raise
+            print(f"bind {host}:{port} failed ({e}), retrying", flush=True)
+            time.sleep(2)
 
 
 def main() -> int:
@@ -1129,22 +1170,23 @@ def main() -> int:
     p.add_argument("--host", default=None,
                    help="bind address, default is the tailnet address")
     p.add_argument("--port", type=int, default=8080)
+    p.add_argument("--tailnet-wait", type=float, default=90.0,
+                   help="seconds to wait for a tailnet address at startup")
     args = p.parse_args()
 
-    host = args.host or default_host()
     print(f"=== piplot v{VERSION} ===")
     print("Design curves in a browser, preview them, send them to the AxiDraw")
     print("https://github.com/sui001/piplot")
-    print()
+    print(flush=True)
+    host = args.host or default_host(args.tailnet_wait)
 
     # Also listen on loopback, because Tailscale Funnel proxies to 127.0.0.1
     # and a tailnet-only bind gives the public side a 502. Loopback is where
     # the password gate applies, so opening it does not open the machines.
-    from werkzeug.serving import make_server
     hosts = [host] if host in ("127.0.0.1", "0.0.0.0") else [host, "127.0.0.1"]
-    servers = [make_server(h, args.port, app, threaded=True) for h in hosts]
+    servers = [bind(h, args.port) for h in hosts]
     for h in hosts:
-        print(f"serving on http://{h}:{args.port}")
+        print(f"serving on http://{h}:{args.port}", flush=True)
     print("tailnet: open.  visitors via Funnel: can look and design, "
           + ("password needed to plot or stop" if access_password() else
              "CANNOT plot, no access password set"))
