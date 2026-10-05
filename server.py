@@ -23,6 +23,7 @@ import hashlib
 import hmac
 import ipaddress
 import threading
+from collections import deque
 import time
 
 from flask import Flask, abort, jsonify, request, send_from_directory
@@ -31,7 +32,7 @@ import machines  # noqa: E402  which machines exist, and how to find them
 from pen_box import MODELS  # noqa: E402  the AxiDraw travel envelopes
 from portlock import hold  # noqa: E402  one thing at a time on a port
 
-VERSION = "0.10.2"
+VERSION = "0.11.0"
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DOCS = os.path.join(HERE, "docs")
@@ -56,7 +57,7 @@ app = Flask(__name__, static_folder=None)
 # can drive.
 
 # The only routes that make a machine move.
-ACTIONS = {"/api/plot", "/api/stop"}
+ACTIONS = {"/api/plot", "/api/stop", "/api/session"}
 
 # The server faces the internet, and nothing it legitimately takes is anywhere
 # near this. A 57,000 point plot is about 2 MB.
@@ -520,6 +521,134 @@ def grbl_worker(job, paths, entry):
         # Leave the machine safe, not mid-stroke with moves still queued. The
         # pen is the urgent part: a stopped carriage with the nib down bleeds
         # a blot through the paper.
+        try:
+            g._halt()
+            g.disconnect()
+        except Exception:
+            pass
+    finally:
+        lock.__exit__(None, None, None)
+        job.state, job.message = end
+
+
+def _grbl_for(entry, device):
+    """The driver object for a GRBL or FluidNC polargraph entry. Opens nothing."""
+    from plotter import Grbl, Polargraph
+    if entry["driver"] == "polargraph":
+        home = entry.get("home")
+        return Polargraph(machines.geometry(entry), serial_port=device,
+                          home=tuple(home) if home else None,
+                          feed=int(entry.get("feed", 3000)),
+                          pen_up_z=float(entry.get("pen_up_z", 5.0)),
+                          pen_down_z=float(entry.get("pen_down_z", 0.0)),
+                          pen_dwell_s=float(entry.get("pen_dwell_s", 0.25)))
+    return Grbl(port=device, travel=tuple(entry["travel"]),
+                feed=int(entry.get("feed", 5000)),
+                pen_up_z=float(entry.get("pen_up_z", 1.0)),
+                pen_down_z=float(entry.get("pen_down_z", 0.0)),
+                pen_dwell_s=float(entry.get("pen_dwell_s", 0.25)),
+                flip_y=bool(entry.get("flip_y", True)))
+
+
+# A pen left down on one spot bleeds a blot through the paper. In a session
+# the pen can be down waiting for the next piece of a live stroke, so after
+# this long with nothing to draw it lifts, and drops again if the stroke goes on.
+SESSION_PEN_REST_S = 2.0
+
+
+def session_worker(job, entry):
+    """Keep one GRBL machine open and draw pieces as they arrive. 5 Oct 2026.
+
+    A plot job opens the port (which resets the board), zeroes, draws, goes
+    home and closes. For a live drawing that is a reset, a pen bob and a trip
+    home for every handful of strokes. A session opens once and zeroes once,
+    then takes pieces from job.queue as a client adds them:
+
+      {"id": stroke id, "points": [[x, y], ...], "end": bool}
+
+    A piece with a new id lifts the pen, travels to its first point and puts
+    the pen down. A piece with the same id carries on from where the pen is,
+    so a client can send a line a few points at a time while it is still
+    being made and the pen follows it. "end" lifts the pen, which then waits
+    right where it is: only closing the session goes home.
+
+    Same rules as grbl_worker otherwise: one connection, the final state set
+    only after the port lock is released, and the machine left safe on error.
+    """
+    polar = entry["driver"] == "polargraph"
+    g = _grbl_for(entry, job.device)
+    lock = hold(job.device, wait=3)
+    if not lock.__enter__():
+        job.state = "error"
+        job.message = f"{job.label} is in use by something else"
+        return
+    end = ("error", "the session ended without saying why")
+
+    def moves(points):
+        out, first = [], True
+        for x, y in points:
+            mx, my = g._xy(x, y)
+            out.append((f"G1X{mx:.2f}Y{my:.2f}F{g.feed}") if first else f"X{mx:.2f}Y{my:.2f}")
+            first = False
+        return out
+
+    pen_down = [f"G0Z{g.pen_down_z:g}", f"G4P{g.pen_dwell_s:g}"]
+    pen_up = [f"G0Z{g.pen_up_z:g}", f"G4P{g.pen_dwell_s:g}"]
+    try:
+        g.connect()
+        if not polar:
+            g.set_origin_here()   # legitimate: the operator confirmed the park
+        job.message = "session open, waiting for strokes"
+        current, resting, idle_since = None, False, time.time()
+        while not job.stop.is_set():
+            try:
+                item = job.queue.popleft()
+            except IndexError:
+                if job.ending.is_set():
+                    break
+                if current is not None and not resting and time.time() - idle_since > SESSION_PEN_REST_S:
+                    g._wait_idle()
+                    g._stream(pen_up)       # do not blot while the line waits
+                    resting = True
+                time.sleep(0.05)
+                continue
+            sid, pts, last = item["id"], item["points"], bool(item.get("end"))
+            if not pts:                       # end of a line whose points already went
+                if sid == current and not resting:
+                    g._stream(pen_up)
+                if sid == current:
+                    current, resting = None, False
+                continue
+            bad = g.check(pts) if len(pts) >= 2 else g.check(pts + pts)
+            if bad:
+                raise ValueError("refusing to move: " + "; ".join(bad))
+            if sid != current:
+                lines = g.encode(pts)                 # up, travel, down, draw, up
+                if not last:
+                    lines = lines[:-1]                # keep the pen down for more
+            else:
+                lines = (pen_down if resting else []) + moves(pts)
+                if last:
+                    lines += pen_up
+            current = None if last else sid
+            resting = False
+            if not g._stream(lines, job.stop):
+                g._halt()
+                break
+            idle_since = time.time()
+            job.done += max(0, len(pts) - 1)
+            job.message = (f"session: {job.done} segments drawn, "
+                           f"{len(job.queue)} pieces waiting")
+        if not job.stop.is_set():
+            g._stream(pen_up)
+            g._wait_idle()
+        g.disconnect()                                # pen up, home, close
+        end = (("stopped", f"session stopped by request after {job.done} segments")
+               if job.stop.is_set() else
+               ("done", f"session closed, {job.done} segments in "
+                        f"{time.time() - job.started:.0f}s"))
+    except Exception as exc:
+        end = ("error", f"{type(exc).__name__}: {exc}")
         try:
             g._halt()
             g.disconnect()
@@ -1021,6 +1150,85 @@ def check():
         # Still rough: acceleration is ignored and the lift time is a guess.
         "estimate_s": round(est),
     })
+
+
+@app.post("/api/session")
+def session():
+    """Open a GRBL machine once and draw strokes as a client sends them.
+
+    {"action": "start", "port": name, "origin_confirmed": true}
+    {"action": "add",   "port": name, "pieces": [{"id", "points", "end"}, ...]}
+    {"action": "end",   "port": name}     pen up, home, close
+
+    Stop (/api/stop) works on a session like on a plot. While a session is
+    open the machine is busy, so no plot can take it.
+    """
+    body = request.get_json(force=True)
+    act = body.get("action")
+    port = body.get("port") or None
+
+    if act == "start":
+        if not body.get("origin_confirmed"):
+            return jsonify({"ok": False, "message": "refusing to start: confirm the "
+                            "carriage is parked in its home corner. No machine here "
+                            "has home switches."}), 400
+        hw_ok, hw, chosen = preflight(port)
+        if not hw_ok or not chosen:
+            failed = [c for c in hw if not c["ok"]]
+            return jsonify({"ok": False, "claims": hw, "message": "refusing to start: " +
+                            "; ".join(c["label"] for c in failed)}), 400
+        if chosen.get("driver") not in ("grbl", "polargraph"):
+            return jsonify({"ok": False, "message": "sessions are for GRBL machines; "
+                            f"{chosen['label']} is {chosen.get('driver')}"}), 400
+        with jobs_lock:
+            entry = machines.load().get(chosen["label"])
+            dev = entry["device"] if entry else None
+            if not dev:
+                return jsonify({"ok": False, "message": f"{chosen['label']} went away"}), 409
+            j = jobs.get(dev)
+            if j and j.busy:
+                return jsonify({"ok": False, "message": f"{j.label} is already drawing"}), 409
+            j = Job(dev, chosen["label"], entry["driver"], entry["travel"])
+            j.kind = "session"
+            j.queue = deque()
+            j.ending = threading.Event()
+            j.state, j.message, j.started = "running", "opening", time.time()
+            jobs[dev] = j
+            j.thread = threading.Thread(target=session_worker, args=(j, entry), daemon=True)
+            j.thread.start()
+        return jsonify({"ok": True, "message": f"session open on {j.label}"})
+
+    entry = machines.load().get(port or "")
+    j = jobs.get(entry["device"]) if entry and entry.get("device") else None
+    if not j or not j.busy or getattr(j, "kind", "") != "session":
+        return jsonify({"ok": False, "message": f"no session is open on {port}"}), 409
+
+    if act == "add":
+        pieces = []
+        for pc in body.get("pieces") or []:
+            pts = [(float(q[0]), float(q[1])) for q in pc.get("points") or []]
+            if pts or pc.get("end"):        # an empty end piece just lifts the pen
+                pieces.append({"id": str(pc.get("id")), "points": pts, "end": bool(pc.get("end"))})
+        allpts = [q for pc in pieces for q in pc["points"]]
+        if len(allpts) == 1:
+            allpts = allpts * 2
+        ok, claims = (True, []) if not allpts else check_claims(allpts, j.travel, j.label, geometry_for({"label": j.label,
+                                                                             "driver": j.driver}))
+        if not ok:
+            failed = [c for c in claims if not c["ok"]]
+            return jsonify({"ok": False, "claims": claims, "message": "refusing: " +
+                            "; ".join(f"{c['label']} ({c['detail']})" if c["detail"]
+                                      else c["label"] for c in failed)}), 400
+        j.queue.extend(pieces)
+        j.total += sum(max(0, len(pc["points"]) - 1) for pc in pieces)
+        return jsonify({"ok": True, "queued": len(j.queue)})
+
+    if act == "end":
+        j.ending.set()
+        return jsonify({"ok": True, "message": f"closing the session on {j.label}: "
+                        "pen up, then home"})
+
+    return jsonify({"ok": False, "message": f"unknown action {act!r}"}), 400
 
 
 @app.post("/api/plot")
