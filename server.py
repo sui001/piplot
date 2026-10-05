@@ -31,7 +31,7 @@ import machines  # noqa: E402  which machines exist, and how to find them
 from pen_box import MODELS  # noqa: E402  the AxiDraw travel envelopes
 from portlock import hold  # noqa: E402  one thing at a time on a port
 
-VERSION = "0.10.1"
+VERSION = "0.10.2"
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DOCS = os.path.join(HERE, "docs")
@@ -485,6 +485,13 @@ def grbl_worker(job, paths, entry):
         job.state = "error"
         job.message = f"{job.label} is in use by something else"
         return
+    # The final state is kept here and only written to the job after the
+    # port is closed and the lock released. "running" is what /api/status
+    # reports as busy, and setting "done" before disconnect let a client that
+    # posts the next plot the moment busy clears (Lyre does) race this worker
+    # for the lock and lose: "in use by something else", and on the CH340
+    # GRBL board every losing attempt was another reset. 5 Oct 2026.
+    end = ("error", "the worker ended without saying why")
     try:
         g.connect()
         if not polar:
@@ -503,14 +510,13 @@ def grbl_worker(job, paths, entry):
             job.done = done
         g.disconnect()
         if job.stop.is_set():
-            job.state = "stopped"
-            job.message = f"stopped by request after {job.done} of {job.total} segments"
+            end = ("stopped", f"stopped by request after {job.done} of "
+                              f"{job.total} segments")
         else:
-            job.state = "done"
-            job.message = (f"finished, {job.total} segments in "
+            end = ("done", f"finished, {job.total} segments in "
                            f"{time.time() - job.started:.0f}s")
     except Exception as exc:
-        job.state, job.message = "error", f"{type(exc).__name__}: {exc}"
+        end = ("error", f"{type(exc).__name__}: {exc}")
         # Leave the machine safe, not mid-stroke with moves still queued. The
         # pen is the urgent part: a stopped carriage with the nib down bleeds
         # a blot through the paper.
@@ -521,6 +527,7 @@ def grbl_worker(job, paths, entry):
             pass
     finally:
         lock.__exit__(None, None, None)
+        job.state, job.message = end
 
 
 def plot_worker(job, paths, model, speed, pen_up, pen_down, preview, accel=75):
@@ -539,6 +546,9 @@ def plot_worker(job, paths, model, speed, pen_up, pen_down, preview, accel=75):
         job.message = (f"{job.label} is in use by something else. A command "
                        f"line tool has it.")
         return
+    # Final state is written only after the lock is released, for the same
+    # reason as grbl_worker: busy has to cover the whole time the port is held.
+    end = ("error", "the worker ended without saying why")
     try:
         ad.interactive()
         o = ad.options
@@ -558,7 +568,7 @@ def plot_worker(job, paths, model, speed, pen_up, pen_down, preview, accel=75):
         o.port = port
         o.port_config = 0
         if not ad.connect():
-            job.state, job.message = "error", f"could not open {job.label} ({port})"
+            end = ("error", f"could not open {job.label} ({port})")
             return
 
         # Ask the board its name before moving anything. This is the claim that
@@ -567,9 +577,8 @@ def plot_worker(job, paths, model, speed, pen_up, pen_down, preview, accel=75):
         answered = (ad.usb_query("QT\r") or "").strip().splitlines()
         answered = answered[0].strip() if answered else ""
         if answered.lower() != job.label.lower() and job.label != port:
-            job.state = "error"
-            job.message = (f"refused: asked for {job.label}, but the board that "
-                           f"answered is {answered or 'unnamed'}")
+            end = ("error", f"refused: asked for {job.label}, but the board "
+                            f"that answered is {answered or 'unnamed'}")
             ad.disconnect()
             return
 
@@ -639,19 +648,20 @@ def plot_worker(job, paths, model, speed, pen_up, pen_down, preview, accel=75):
         ad.disconnect()
 
         if job.stop.is_set():
-            job.state = "stopped"
-            job.message = f"stopped by request after {job.done} of {job.total} segments"
+            end = ("stopped", f"stopped by request after {job.done} of "
+                              f"{job.total} segments")
         else:
-            job.state = "done"
-            job.message = f"finished, {job.total} segments in {time.time() - job.started:.0f}s"
+            end = ("done", f"finished, {job.total} segments in "
+                           f"{time.time() - job.started:.0f}s")
     except Exception as exc:
-        job.state, job.message = "error", f"{type(exc).__name__}: {exc}"
+        end = ("error", f"{type(exc).__name__}: {exc}")
         try:
             ad.disconnect()
         except Exception:
             pass
     finally:
         lock.__exit__(None, None, None)
+        job.state, job.message = end
 
 
 PAGES = ("index", "import")
