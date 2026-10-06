@@ -100,7 +100,7 @@ def autodiscover() -> dict:
     to is worth naming with `ST,<name>`.
 
     The envelope is assumed to be the A3 machine, which is what both boards on
-    lyre are and what the pages already default to. Put a machines.json in
+    plotterpi are and what the pages already default to. Put a machines.json in
     place if that is wrong; guessing is exactly what the config file is for.
     """
     out = {}

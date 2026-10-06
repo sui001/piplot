@@ -489,7 +489,7 @@ def grbl_worker(job, paths, entry):
     # The final state is kept here and only written to the job after the
     # port is closed and the lock released. "running" is what /api/status
     # reports as busy, and setting "done" before disconnect let a client that
-    # posts the next plot the moment busy clears (Lyre does) race this worker
+    # posts the next plot the moment busy clears (plotterpi does) race this worker
     # for the lock and lose: "in use by something else", and on the CH340
     # GRBL board every losing attempt was another reset. 5 Oct 2026.
     end = ("error", "the worker ended without saying why")

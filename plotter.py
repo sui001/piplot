@@ -109,7 +109,7 @@ class Plotter:
 class DryRun(Plotter):
     """Accumulate strokes and write an SVG. No hardware, no waiting."""
 
-    def __init__(self, path: str = "lyre_output.svg",
+    def __init__(self, path: str = "plotterpi_output.svg",
                  paper_mm: Tuple[float, float] = (297.0, 210.0),
                  flush_every: int = 25):
         self.path = path
@@ -245,7 +245,7 @@ class AxiDraw(Plotter):
 class Grbl(Plotter):
     """A GRBL 1.1 board over serial, with the pen servo on the Z axis.
 
-    Written against the homemade CoreXY machine on lyre, whose particulars are
+    Written against the homemade CoreXY machine on plotterpi, whose particulars are
     worth stating because none of them are guessable:
 
     - **The pen is on Z, not the spindle.** Its build reports `[OPT:C,15,128]`
