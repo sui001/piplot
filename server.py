@@ -32,7 +32,7 @@ import machines  # noqa: E402  which machines exist, and how to find them
 from pen_box import MODELS  # noqa: E402  the AxiDraw travel envelopes
 from portlock import hold  # noqa: E402  one thing at a time on a port
 
-VERSION = "0.11.0"
+VERSION = "0.11.1"
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DOCS = os.path.join(HERE, "docs")
@@ -596,6 +596,23 @@ def session_worker(job, entry):
     pen_up = [f"G0Z{g.pen_up_z:g}", f"G4P{g.pen_dwell_s:g}"]
     try:
         g.connect()
+        # Keep the last lines written and read, so a board that rejects
+        # something (error:20 on 6 Oct, from G-code that passes $C check mode
+        # line by line) says what it actually received. Logging only.
+        seen = deque(maxlen=40)
+        raw_write, raw_readline = g.sp.write, g.sp.readline
+
+        def tap_write(data, _w=raw_write):
+            seen.append(">> " + data.decode(errors="replace").rstrip())
+            return _w(data)
+
+        def tap_readline(_r=raw_readline):
+            line = _r()
+            if line.strip():
+                seen.append("<< " + line.decode(errors="replace").strip())
+            return line
+
+        g.sp.write, g.sp.readline = tap_write, tap_readline
         if not polar:
             g.set_origin_here()   # legitimate: the operator confirmed the park
         job.message = "session open, waiting for strokes"
@@ -649,6 +666,9 @@ def session_worker(job, entry):
                         f"{time.time() - job.started:.0f}s"))
     except Exception as exc:
         end = ("error", f"{type(exc).__name__}: {exc}")
+        print(f"session on {job.label} failed: {exc}. Last lines on the wire:", flush=True)
+        for l in (locals().get("seen") or []):
+            print("   " + l, flush=True)
         try:
             g._halt()
             g.disconnect()
