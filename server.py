@@ -32,7 +32,7 @@ import machines  # noqa: E402  which machines exist, and how to find them
 from pen_box import MODELS  # noqa: E402  the AxiDraw travel envelopes
 from portlock import hold  # noqa: E402  one thing at a time on a port
 
-VERSION = "0.14.0"
+VERSION = "0.15.0"
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DOCS = os.path.join(HERE, "docs")
@@ -173,6 +173,9 @@ class Job:
         self.total = 0
         self.started = 0.0
         self.estimate_s = 0.0
+        # Fraction of the machine's own speed (machines.json feed / speed).
+        # Set from a request's speed_pct; a session can change it live.
+        self.speed_scale = 1.0
 
     @property
     def busy(self) -> bool:
@@ -513,6 +516,7 @@ def grbl_worker(job, paths, entry):
                  pen_down_z=float(entry.get("pen_down_z", 0.0)),
                  pen_dwell_s=float(entry.get("pen_dwell_s", 0.25)),
                  flip_y=bool(entry.get("flip_y", True)))
+    g.feed = max(1, int(g.feed * job.speed_scale))
 
     lock = hold(job.device, wait=3)
     if not lock.__enter__():
@@ -583,6 +587,7 @@ def etchatron_worker(job, paths, entry):
         job.done = base + n
 
     e = _etchatron_for(entry, job.device, progress)
+    e.speed *= job.speed_scale
     base = 0
 
     lock = hold(job.device, wait=3)
@@ -651,6 +656,22 @@ def _grbl_for(entry, device):
 SESSION_PEN_REST_S = 2.0
 
 
+def speed_scale(body) -> float:
+    """A request's speed_pct as a fraction of the machine's own speed.
+
+    Percent of what machines.json says, not mm/min, so one control means the
+    same on a GRBL feed, an AxiDraw percentage and the Etchatron's knob
+    degrees per second. Held to 10..150%: below that a plot takes all day,
+    and suidraw's drawing went bad somewhere past 5000 mm/min (19 Sep), so
+    anything over its own speed is a choice made knowingly, not by a slip.
+    """
+    try:
+        pct = float(body.get("speed_pct", 100))
+    except (TypeError, ValueError):
+        pct = 100.0
+    return max(10.0, min(150.0, pct)) / 100.0
+
+
 def session_abandoned(job) -> bool:
     """True once a session's client has gone quiet for longer than it asked.
 
@@ -686,6 +707,7 @@ def session_worker(job, entry):
     """
     polar = entry["driver"] == "polargraph"
     g = _grbl_for(entry, job.device)
+    base_feed, applied_scale = g.feed, None
     lock = hold(job.device, wait=3)
     if not lock.__enter__():
         job.state = "error"
@@ -741,6 +763,9 @@ def session_worker(job, entry):
                     resting = True
                 time.sleep(0.05)
                 continue
+            if job.speed_scale != applied_scale:
+                g.feed = max(1, int(base_feed * job.speed_scale))
+                applied_scale = job.speed_scale
             sid, pts, last = item["id"], item["points"], bool(item.get("end"))
             if not pts:                       # end of a line whose points already went
                 if sid == current and not resting:
@@ -815,6 +840,8 @@ def etchatron_session_worker(job, entry):
     same reason as etchatron_worker: a trip home would scratch a line.
     """
     e = _etchatron_for(entry, job.device)
+    base_speed, applied_scale = e.speed, job.speed_scale
+    e.speed = base_speed * job.speed_scale
     lock = hold(job.device, wait=3)
     if not lock.__enter__():
         job.state = "error"
@@ -839,6 +866,10 @@ def etchatron_session_worker(job, entry):
             pts = item["points"]
             if not pts:
                 continue
+            if job.speed_scale != applied_scale:
+                e.speed = base_speed * job.speed_scale
+                e._cmd(f"F {round(e.speed * e.STEPS_PER_DEG)}")
+                applied_scale = job.speed_scale
             bad = e.check(pts)
             if bad:
                 raise ValueError("refusing to move: " + "; ".join(bad))
@@ -1413,6 +1444,7 @@ def session():
             except (TypeError, ValueError):
                 j.idle_close_s = 0.0
             j.last_contact = time.time()
+            j.speed_scale = speed_scale(body)
             j.state, j.message, j.started = "running", "opening", time.time()
             jobs[dev] = j
             worker = etchatron_session_worker if entry["driver"] == "etchatron" else session_worker
@@ -1429,6 +1461,11 @@ def session():
 
     if act == "ping":
         return jsonify({"ok": True, "queued": len(j.queue)})
+
+    if act == "speed":
+        # Live: takes effect from the next piece the worker starts.
+        j.speed_scale = speed_scale(body)
+        return jsonify({"ok": True, "speed_pct": round(j.speed_scale * 100)})
 
     if act == "add":
         pieces = []
@@ -1543,6 +1580,7 @@ def plot():
         job.message = "starting"
         job.total = sum(len(p) - 1 for p in paths)
         job.started = time.time()
+        job.speed_scale = speed_scale(body)
         if entry["driver"] in ("grbl", "polargraph"):
             job.thread = threading.Thread(
                 target=grbl_worker, args=(job, paths, entry), daemon=True)
@@ -1553,7 +1591,8 @@ def plot():
             job.thread = threading.Thread(
                 target=plot_worker,
                 args=(job, paths, int(entry.get("model", 2)),
-                      int(body.get("speed", entry.get("speed", 25))),
+                      int(body.get("speed") or max(1, min(100, round(
+                          int(entry.get("speed", 25)) * job.speed_scale)))),
                       int(body.get("pen_up", entry.get("pen_up", 60))),
                       int(body.get("pen_down", entry.get("pen_down", 0))),
                       bool(body.get("preview", True)),
