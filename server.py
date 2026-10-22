@@ -32,7 +32,7 @@ import machines  # noqa: E402  which machines exist, and how to find them
 from pen_box import MODELS  # noqa: E402  the AxiDraw travel envelopes
 from portlock import hold  # noqa: E402  one thing at a time on a port
 
-VERSION = "0.12.0"
+VERSION = "0.13.0"
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DOCS = os.path.join(HERE, "docs")
@@ -582,11 +582,7 @@ def etchatron_worker(job, paths, entry):
     def progress(n):
         job.done = base + n
 
-    slack = entry.get("slack", [23.0, 17.0])
-    e = Etchatron(port=job.device, travel=tuple(entry["travel"]),
-                  speed_deg_s=float(entry.get("speed", 60.0)),
-                  slack=(float(slack[0]), float(slack[1])),
-                  blend=int(entry.get("blend", 3)), progress=progress)
+    e = _etchatron_for(entry, job.device, progress)
     base = 0
 
     lock = hold(job.device, wait=3)
@@ -771,6 +767,75 @@ def session_worker(job, entry):
         try:
             g._halt()
             g.disconnect()
+        except Exception:
+            pass
+    finally:
+        lock.__exit__(None, None, None)
+        job.state, job.message = end
+
+
+def _etchatron_for(entry, device, progress=None):
+    """The driver object for an Etchatron entry. Opens nothing."""
+    from plotter import Etchatron
+    slack = entry.get("slack", [23.0, 17.0])
+    return Etchatron(port=device, travel=tuple(entry["travel"]),
+                     speed_deg_s=float(entry.get("speed", 60.0)),
+                     slack=(float(slack[0]), float(slack[1])),
+                     blend=int(entry.get("blend", 3)), progress=progress)
+
+
+def etchatron_session_worker(job, entry):
+    """A live session on the Etchatron: open once, draw pieces as they come.
+
+    The Etch A Sketch version of session_worker, for a drawing that runs
+    until someone stops it. There is no pen, so every piece is drawn as it
+    arrives and stroke ids only matter to the client; a client that wants
+    one unbroken line starts each piece on the last point of the one before.
+    Closing (end or stop) turns the motors off and goes nowhere, for the
+    same reason as etchatron_worker: a trip home would scratch a line.
+    """
+    e = _etchatron_for(entry, job.device)
+    lock = hold(job.device, wait=3)
+    if not lock.__enter__():
+        job.state = "error"
+        job.message = f"{job.label} is in use by something else"
+        return
+    end = ("error", "the session ended without saying why")
+    try:
+        job.message = "connecting (the Uno resets)"
+        e.connect()
+        job.message = "session open, waiting for strokes"
+        while not job.stop.is_set():
+            try:
+                item = job.queue.popleft()
+            except IndexError:
+                if job.ending.is_set():
+                    break
+                time.sleep(0.05)
+                continue
+            pts = item["points"]
+            if not pts:
+                continue
+            bad = e.check(pts)
+            if bad:
+                raise ValueError("refusing to move: " + "; ".join(bad))
+            base, segs = job.done, max(0, len(pts) - 1)
+            e.progress = lambda n, b=base, m=segs: setattr(job, "done", b + min(n, m))
+            if not e.draw_path(pts, job.stop):
+                break
+            job.done = base + segs
+            job.message = (f"session: {job.done} segments drawn, "
+                           f"{len(job.queue)} pieces waiting")
+        e.disconnect()                                # motors off, stays put
+        end = (("stopped", f"session stopped by request after {job.done} segments")
+               if job.stop.is_set() else
+               ("done", f"session closed, {job.done} segments in "
+                        f"{time.time() - job.started:.0f}s"))
+    except Exception as exc:
+        end = ("error", f"{type(exc).__name__}: {exc}")
+        try:
+            e._halt()
+            e.disconnect()
         except Exception:
             pass
     finally:
@@ -1301,8 +1366,9 @@ def session():
             failed = [c for c in hw if not c["ok"]]
             return jsonify({"ok": False, "claims": hw, "message": "refusing to start: " +
                             "; ".join(c["label"] for c in failed)}), 400
-        if chosen.get("driver") not in ("grbl", "polargraph"):
-            return jsonify({"ok": False, "message": "sessions are for GRBL machines; "
+        if chosen.get("driver") not in ("grbl", "polargraph", "etchatron"):
+            return jsonify({"ok": False, "message": "sessions are for GRBL machines "
+                            "and the Etchatron; "
                             f"{chosen['label']} is {chosen.get('driver')}"}), 400
         with jobs_lock:
             entry = machines.load().get(chosen["label"])
@@ -1318,7 +1384,8 @@ def session():
             j.ending = threading.Event()
             j.state, j.message, j.started = "running", "opening", time.time()
             jobs[dev] = j
-            j.thread = threading.Thread(target=session_worker, args=(j, entry), daemon=True)
+            worker = etchatron_session_worker if entry["driver"] == "etchatron" else session_worker
+            j.thread = threading.Thread(target=worker, args=(j, entry), daemon=True)
             j.thread.start()
         return jsonify({"ok": True, "message": f"session open on {j.label}"})
 
