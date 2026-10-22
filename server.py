@@ -32,7 +32,7 @@ import machines  # noqa: E402  which machines exist, and how to find them
 from pen_box import MODELS  # noqa: E402  the AxiDraw travel envelopes
 from portlock import hold  # noqa: E402  one thing at a time on a port
 
-VERSION = "0.11.2"
+VERSION = "0.11.3"
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DOCS = os.path.join(HERE, "docs")
@@ -93,8 +93,38 @@ def needs_password() -> bool:
     return not from_tailnet(request.remote_addr or "")
 
 
+# Other pages allowed to call this API from a browser. The Etchatron control
+# page lives on plotterpi's tailnet-only HTTPS site (:8443), a different
+# origin, and offers these plotters as outputs beside its own Uno. Without
+# this the browser blocks it from reading the replies. It grants nothing the
+# public pages cannot already do: the password gate below still applies, and
+# requests reaching this server through Tailscale still arrive from loopback,
+# so plot and stop still need the password from there.
+CORS_ORIGINS = {
+    "https://plotterpi.tail405153.ts.net:8443",
+    "http://localhost:5200",      # the control page served locally
+    "http://localhost:8000",
+}
+
+
+@app.after_request
+def cors(resp):
+    origin = request.headers.get("Origin", "")
+    if origin in CORS_ORIGINS:
+        resp.headers["Access-Control-Allow-Origin"] = origin
+        resp.headers["Vary"] = "Origin"
+        resp.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+        resp.headers["Access-Control-Allow-Headers"] = "Content-Type, X-Plot-Password"
+        resp.headers["Access-Control-Max-Age"] = "600"
+    return resp
+
+
 @app.before_request
 def gate():
+    # A CORS preflight carries no password and moves nothing; let Flask's
+    # automatic OPTIONS answer it so the real request can follow.
+    if request.method == "OPTIONS":
+        return None
     if request.path not in ACTIONS or not needs_password():
         return None
     pw = access_password()
