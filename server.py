@@ -32,7 +32,7 @@ import machines  # noqa: E402  which machines exist, and how to find them
 from pen_box import MODELS  # noqa: E402  the AxiDraw travel envelopes
 from portlock import hold  # noqa: E402  one thing at a time on a port
 
-VERSION = "0.13.0"
+VERSION = "0.14.0"
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DOCS = os.path.join(HERE, "docs")
@@ -651,6 +651,20 @@ def _grbl_for(entry, device):
 SESSION_PEN_REST_S = 2.0
 
 
+def session_abandoned(job) -> bool:
+    """True once a session's client has gone quiet for longer than it asked.
+
+    Opt-in: a client that passes idle_close_s at start promises to keep in
+    touch (add or ping) and accepts that the session closes itself if it
+    stops. The Etchatron page does, because a browser tab closed mid-drawing
+    otherwise leaves the machine held open and busy until someone ends it by
+    hand (22 Oct 2026). plotterpi's room tracking does not ask: a quiet room
+    is not a lost client.
+    """
+    limit = getattr(job, "idle_close_s", 0) or 0
+    return limit > 0 and time.time() - getattr(job, "last_contact", time.time()) > limit
+
+
 def session_worker(job, entry):
     """Keep one GRBL machine open and draw pieces as they arrive. 5 Oct 2026.
 
@@ -718,6 +732,9 @@ def session_worker(job, entry):
             except IndexError:
                 if job.ending.is_set():
                     break
+                if session_abandoned(job):
+                    job.abandoned = True
+                    break
                 if current is not None and not resting and time.time() - idle_since > SESSION_PEN_REST_S:
                     g._wait_idle()
                     g._stream(pen_up)       # do not blot while the line waits
@@ -757,6 +774,9 @@ def session_worker(job, entry):
         g.disconnect()                                # pen up, home, close
         end = (("stopped", f"session stopped by request after {job.done} segments")
                if job.stop.is_set() else
+               ("done", f"session closed after {job.idle_close_s:.0f}s with no word from "
+                        f"its page (closed or lost?), {job.done} segments")
+               if getattr(job, "abandoned", False) else
                ("done", f"session closed, {job.done} segments in "
                         f"{time.time() - job.started:.0f}s"))
     except Exception as exc:
@@ -811,6 +831,9 @@ def etchatron_session_worker(job, entry):
             except IndexError:
                 if job.ending.is_set():
                     break
+                if session_abandoned(job):
+                    job.abandoned = True
+                    break
                 time.sleep(0.05)
                 continue
             pts = item["points"]
@@ -829,6 +852,9 @@ def etchatron_session_worker(job, entry):
         e.disconnect()                                # motors off, stays put
         end = (("stopped", f"session stopped by request after {job.done} segments")
                if job.stop.is_set() else
+               ("done", f"session closed after {job.idle_close_s:.0f}s with no word from "
+                        f"its page (closed or lost?), {job.done} segments")
+               if getattr(job, "abandoned", False) else
                ("done", f"session closed, {job.done} segments in "
                         f"{time.time() - job.started:.0f}s"))
     except Exception as exc:
@@ -1382,6 +1408,11 @@ def session():
             j.kind = "session"
             j.queue = deque()
             j.ending = threading.Event()
+            try:
+                j.idle_close_s = max(0.0, float(body.get("idle_close_s") or 0))
+            except (TypeError, ValueError):
+                j.idle_close_s = 0.0
+            j.last_contact = time.time()
             j.state, j.message, j.started = "running", "opening", time.time()
             jobs[dev] = j
             worker = etchatron_session_worker if entry["driver"] == "etchatron" else session_worker
@@ -1393,6 +1424,11 @@ def session():
     j = jobs.get(entry["device"]) if entry and entry.get("device") else None
     if not j or not j.busy or getattr(j, "kind", "") != "session":
         return jsonify({"ok": False, "message": f"no session is open on {port}"}), 409
+
+    j.last_contact = time.time()          # add, ping and end all count
+
+    if act == "ping":
+        return jsonify({"ok": True, "queued": len(j.queue)})
 
     if act == "add":
         pieces = []
