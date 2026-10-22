@@ -331,6 +331,32 @@ class Grbl(Plotter):
         time.sleep(wait)
         return self.sp.read(self.sp.in_waiting or 1).decode(errors="replace").strip()
 
+    def _send_ok(self, line: str, timeout: float = 10.0) -> None:
+        """Send one line and wait for ITS reply before anything else goes.
+
+        For the set-up lines that come before a stream: pen moves, the dwell,
+        the origin. `_send` writes and glances, so a reply that is slow (G4
+        holds the board for the whole dwell, G10 waits for motion to stop)
+        arrives after it has stopped looking. `_stream` then reads that stale
+        `ok` as the acknowledgement of one of ITS lines, believes the board's
+        128 byte receive buffer has room it does not, overfills it, and the
+        board receives a chopped line: error:20 on G-code that is perfectly
+        valid. Seen on suidraw-0 on 6 and 23 Oct; reproduced 23 Oct in check
+        mode with nothing moving (2 runs in 20), so not electrical noise.
+        """
+        self.sp.write((line + "\n").encode())
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            reply = self.sp.readline().decode(errors="replace").strip()
+            if not reply:
+                continue
+            if reply == "ok":
+                return
+            if reply.startswith("error") or reply.startswith("ALARM"):
+                raise RuntimeError(f"grbl rejected {line!r}: {reply}")
+            # anything else is a push message ([MSG:...], the banner): not ours
+        raise TimeoutError(f"no ok for {line!r} within {timeout:.0f}s")
+
     def _state(self) -> str:
         """The one word inside GRBL's status report: Idle, Run, Hold, Alarm."""
         self.sp.reset_input_buffer()
@@ -371,10 +397,12 @@ class Grbl(Plotter):
         time.sleep(2.0)          # the CH340 asserts DTR, which resets the board
         self.sp.reset_input_buffer()
         self._send("", 0.3)      # shake off any half command left by a replug
+        time.sleep(0.2)
+        self.sp.reset_input_buffer()   # and whatever it said back
 
-        self._send("G21", 0.2)   # millimetres
-        self._send("G90", 0.2)   # absolute
-        self._send("G94", 0.2)   # feed is units per minute
+        self._send_ok("G21")     # millimetres
+        self._send_ok("G90")     # absolute
+        self._send_ok("G94")     # feed is units per minute
 
         # Note what connect() deliberately does NOT do: set the origin. It used
         # to, on every connect, which is right only when the carriage happens
@@ -398,7 +426,7 @@ class Grbl(Plotter):
         soft reset that stopping needs, while G10 L20 writes the work offset
         to EEPROM and survives it.
         """
-        self._send("G10 L20 P0 X0 Y0 Z0", 0.3)
+        self._send_ok("G10 L20 P0 X0 Y0 Z0")
 
     # ---- the pen -----------------------------------------------------------
 
@@ -406,8 +434,8 @@ class Grbl(Plotter):
         # The dwell is not superstition. GRBL's move can complete before the
         # servo has physically arrived, and the next move then starts with the
         # nib halfway down, which drags a tail into the start of the stroke.
-        self._send(f"G0 Z{z:g}", 0.05)
-        self._send(f"G4 P{self.pen_dwell_s:g}", 0.05)
+        self._send_ok(f"G0 Z{z:g}")
+        self._send_ok(f"G4 P{self.pen_dwell_s:g}")
 
     def penup(self) -> None:
         # No "already up" guard, unlike pendown. Lifting costs 0.12 s and a
