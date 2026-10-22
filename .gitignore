@@ -8,3 +8,6 @@ plan.json
 # business, and a deploy must never overwrite it. See machines.example.json.
 machines.json
 access_password.txt
+
+# Copied in at deploy from sui001/etchatron (control/index.html); that repo is its source.
+docs/etchatron.html

@@ -40,7 +40,7 @@ BY_PATH = "/dev/serial/by-path"
 
 # What an entry may say. Anything else is ignored rather than rejected, so an
 # older server does not choke on a key added for a newer machine.
-DRIVERS = ("axidraw", "grbl", "polargraph")
+DRIVERS = ("axidraw", "grbl", "polargraph", "etchatron")
 
 # A polargraph's shape is not a rectangle, so its entry names a rig from
 # polargraph.py instead of trusting a bare travel. The rig carries the anchor

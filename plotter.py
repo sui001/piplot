@@ -575,6 +575,200 @@ class Grbl(Plotter):
             self.sp = None
 
 
+class Etchatron(Plotter):
+    """The motorised Etch A Sketch: an Uno running sui001/etchatron's
+    controller/controller.ino, two TMC2209s turning the knobs through 3:1 belts.
+
+    Its particulars, because none of them are guessable:
+
+    - **Units are knob degrees, not mm.** Nothing has measured how far the
+      stylus travels per knob turn, and nothing needs to: the drawing is
+      fitted to `travel` like any sheet. `travel` = (1200, 1200) means 600
+      degrees either side of the centre, which is also the envelope check.
+    - **The stylus zero is the centre, not a corner.** Paper (0, 0) is the top
+      left as everywhere in piplot; the board's (0, 0) is wherever the stylus
+      sat when the port opened, which the operator confirms is the middle of
+      the screen. So paper (W/2, H/2) is the board's zero, y flipped.
+    - **Opening the port resets the Uno** (DTR), and it boots with the motors
+      OFF and its position at zero. That is what makes "stylus centred" a
+      legitimate origin. The motors go on for the drawing and off again at
+      the end, so the knobs turn by hand for the next wipe and re-centre.
+    - **There is no pen to lift.** A travel move draws a line like any other,
+      so penup and pendown do nothing and nothing goes home at the end:
+      driving back to the centre would scratch a line across the picture.
+    - **The slack is the Etch A Sketch's own** (string drive, part dead gap,
+      part spring). The board takes it up blended into the next stroke;
+      `slack` and `blend` are what the spiral ladders settled on, 21 Oct 2026.
+
+    The firmware queues 16 moves and reports `D n` as each finishes, so moves
+    are streamed with WINDOW in flight, and `progress(n)` is called with the
+    moves finished in the current path, for /api/status.
+    """
+
+    WINDOW = 12                 # firmware queue is 16; leave it headroom
+    STEPS_PER_DEG = 200 * 16 * 60 / 20 / 360.0   # 1/16, 20T motor -> 60T knob
+
+    def __init__(self, port: str, baud: int = 115200,
+                 travel: Tuple[float, float] = (1200.0, 1200.0),
+                 speed_deg_s: float = 60.0, slack: Tuple[float, float] = (23.0, 17.0),
+                 blend: int = 3, motors: bool = True, progress=None):
+        self.sp = None
+        self.port = port
+        self.baud = baud
+        self.travel = travel
+        self.speed = speed_deg_s
+        self.slack = slack
+        self.blend = blend
+        self.motors = motors        # False = protocol test, nothing turns
+        self.progress = progress
+        self.sent = 0               # board's running counts since connect
+        self.done = 0
+        self.banner = ""
+        self._buf = b""
+
+    def _steps(self, x: float, y: float) -> Tuple[int, int]:
+        """Paper degrees, origin top left, y down -> board steps from the centre."""
+        k = self.STEPS_PER_DEG
+        return (round((x - self.travel[0] / 2.0) * k),
+                round((self.travel[1] / 2.0 - y) * k))
+
+    def check(self, points) -> list:
+        if not points:
+            return ["the path has no points"]
+        tx, ty = self.travel
+        bad = []
+        xs = [p[0] for p in points]
+        ys = [p[1] for p in points]
+        if min(xs) < 0 or max(xs) > tx:
+            bad.append(f"x spans {min(xs):.1f} to {max(xs):.1f} knob deg, "
+                       f"the screen has 0 to {tx:.0f}")
+        if min(ys) < 0 or max(ys) > ty:
+            bad.append(f"y spans {min(ys):.1f} to {max(ys):.1f} knob deg, "
+                       f"the screen has 0 to {ty:.0f}")
+        return bad
+
+    # ---- the wire ----------------------------------------------------------
+
+    def _lines(self, timeout: float):
+        """Whatever complete lines arrive within `timeout` seconds."""
+        deadline = time.time() + timeout
+        out = []
+        while True:
+            n = self.sp.in_waiting
+            if n:
+                self._buf += self.sp.read(n)
+                while b"\n" in self._buf:
+                    raw, self._buf = self._buf.split(b"\n", 1)
+                    line = raw.decode(errors="replace").strip()
+                    if line:
+                        out.append(line)
+            if out or time.time() >= deadline:
+                return out
+            time.sleep(0.01)
+
+    def _handle(self, line: str) -> None:
+        if line.startswith("D "):
+            self.done = int(line.split()[1])
+        elif line.startswith("aborted"):
+            self.done = self.sent = int(line.split()[1])
+        elif line.startswith("err"):
+            raise RuntimeError(f"the Etchatron board refused a command: {line}")
+
+    def _cmd(self, line: str) -> None:
+        """A setup command, answered by `ok` or `err`."""
+        self.sp.write((line + "\n").encode())
+        deadline = time.time() + 2.0
+        while time.time() < deadline:
+            for l in self._lines(0.2):
+                if l == "ok":
+                    return
+                self._handle(l)
+        raise TimeoutError(f"no answer to {line!r} from the Etchatron board")
+
+    def connect(self) -> None:
+        import serial
+
+        self.sp = serial.Serial(self.port, self.baud, timeout=0.2)
+        # The Uno resets on open and prints its identity, then "ready".
+        deadline = time.time() + 6.0
+        seen = []
+        while time.time() < deadline:
+            for l in self._lines(0.3):
+                seen.append(l)
+                if l.startswith("==="):
+                    self.banner = l.strip("= ")
+                if l == "ready":
+                    if "Etchatron controller" not in self.banner:
+                        raise RuntimeError(f"the board on {self.port} is not running "
+                                           f"the Etchatron controller: {self.banner!r}")
+                    k = self.STEPS_PER_DEG
+                    self._cmd(f"B {round(self.slack[0] * k)} {round(self.slack[1] * k)} {int(self.blend)}")
+                    self._cmd(f"F {round(self.speed * k)}")
+                    self._cmd("E 1" if self.motors else "E 0")
+                    return
+        raise TimeoutError(f"the Etchatron board on {self.port} never said ready "
+                           f"(heard: {' / '.join(seen[-4:]) or 'nothing'}). Flash "
+                           f"controller/controller.ino from sui001/etchatron.")
+
+    def penup(self) -> None:
+        pass                        # an Etch A Sketch cannot lift its stylus
+
+    def pendown(self) -> None:
+        pass
+
+    def goto(self, x: float, y: float) -> None:
+        self.draw_path([(x, y)])
+
+    def draw_path(self, points, stop_event=None) -> bool:
+        """Stream one path as absolute moves, WINDOW in flight; block until drawn.
+
+        Returns False if stopped. Raises if the board goes quiet: no move
+        finishing for 60 s while moves are queued means something is wrong
+        (the slowest single move is a few seconds).
+        """
+        base = self.done
+        last_change, last_done = time.time(), self.done
+        pts = list(points)
+        i = 0
+        while i < len(pts) or self.done < self.sent:
+            if stop_event is not None and stop_event.is_set():
+                self._halt()
+                return False
+            while i < len(pts) and self.sent - self.done < self.WINDOW:
+                sx, sy = self._steps(*pts[i])
+                self.sp.write(f"M {sx} {sy}\n".encode())
+                self.sent += 1
+                i += 1
+            for l in self._lines(0.2):
+                if l != "ok" and not l.startswith("P "):
+                    self._handle(l)
+            if self.done != last_done:
+                last_done, last_change = self.done, time.time()
+                if self.progress:
+                    self.progress(self.done - base)
+            elif time.time() - last_change > 60:
+                raise TimeoutError("the Etchatron board stopped finishing moves")
+        return True
+
+    def _halt(self) -> None:
+        """Drop the queue and the current move; the stylus stays where it is."""
+        if self.sp:
+            self.sp.write(b"!")
+            for l in self._lines(1.0):
+                if l.startswith("aborted"):
+                    self._handle(l)
+
+    def disconnect(self) -> None:
+        if not self.sp:
+            return
+        try:
+            self._cmd("E 0")        # knobs free for the wipe and re-centre
+        except Exception:
+            pass
+        self.sp.close()
+        self.sp = None
+
+
 class _Socket:
     """A TCP socket wearing pyserial's clothes.
 

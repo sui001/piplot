@@ -32,7 +32,7 @@ import machines  # noqa: E402  which machines exist, and how to find them
 from pen_box import MODELS  # noqa: E402  the AxiDraw travel envelopes
 from portlock import hold  # noqa: E402  one thing at a time on a port
 
-VERSION = "0.11.3"
+VERSION = "0.12.0"
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DOCS = os.path.join(HERE, "docs")
@@ -454,6 +454,9 @@ def preflight(port):
                                  "it is FluidNC, and refuses if opening the "
                                  "port reset it"
                                  if chosen["driver"] == "polargraph" else
+                                 "probed: opening this board's port resets it; "
+                                 "the worker checks the Etchatron banner"
+                                 if chosen["driver"] == "etchatron" else
                                  "probed: opening this board's port resets it")})
         return True, out, chosen
 
@@ -554,6 +557,72 @@ def grbl_worker(job, paths, entry):
         try:
             g._halt()
             g.disconnect()
+        except Exception:
+            pass
+    finally:
+        lock.__exit__(None, None, None)
+        job.state, job.message = end
+
+
+def etchatron_worker(job, paths, entry):
+    """Draw one plot on the Etchatron, start to finish, on one connection.
+
+    Like grbl_worker, one connection is the rule: opening the Uno's port
+    resets it, and a reset makes wherever the stylus is the new zero. The
+    operator has confirmed the stylus is in the centre of the screen, which
+    is what makes that reset the origin rather than a loss of it.
+
+    Unlike every other machine here it does not go home at the end: the
+    stylus cannot lift, so a trip back to the centre would scratch a line
+    across the picture. The motors go off instead, so the knobs turn by hand
+    for the wipe and re-centre.
+    """
+    from plotter import Etchatron, merge_paths
+
+    def progress(n):
+        job.done = base + n
+
+    slack = entry.get("slack", [23.0, 17.0])
+    e = Etchatron(port=job.device, travel=tuple(entry["travel"]),
+                  speed_deg_s=float(entry.get("speed", 60.0)),
+                  slack=(float(slack[0]), float(slack[1])),
+                  blend=int(entry.get("blend", 3)), progress=progress)
+    base = 0
+
+    lock = hold(job.device, wait=3)
+    if not lock.__enter__():
+        job.state = "error"
+        job.message = f"{job.label} is in use by something else"
+        return
+    end = ("error", "the worker ended without saying why")
+    try:
+        job.message = "connecting (the Uno resets)"
+        e.connect()
+        # No pen lifts, so separate paths join with a drawn line anyway;
+        # merging only drops the ones that already meet.
+        drawn = merge_paths(paths)
+        job.total = sum(len(p) for p in drawn)
+        job.message = "drawing"
+        for i, path in enumerate(drawn):
+            if job.stop.is_set():
+                break
+            job.message = f"drawing path {i + 1} of {len(drawn)}"
+            if not e.draw_path(path, job.stop):
+                break
+            base += len(path)
+            job.done = base
+        e.disconnect()
+        if job.stop.is_set():
+            end = ("stopped", f"stopped by request after {job.done} of "
+                              f"{job.total} moves")
+        else:
+            end = ("done", f"finished, {job.total} moves in "
+                           f"{time.time() - job.started:.0f}s")
+    except Exception as exc:
+        end = ("error", f"{type(exc).__name__}: {exc}")
+        try:
+            e._halt()
+            e.disconnect()
         except Exception:
             pass
     finally:
@@ -856,6 +925,11 @@ def page(name):
     # Only the pages that exist. The import page linked to import.html, which
     # this server never served, so it was a 404 on the Pi and only ever
     # worked on GitHub Pages or through a test harness.
+    if name == "etchatron" and os.path.exists(os.path.join(DOCS, "etchatron.html")):
+        # The Etchatron control page. Its source is sui001/etchatron
+        # (control/index.html); it is copied here at deploy and gitignored,
+        # so it is served but not counted in page_stamp.
+        return send_from_directory(DOCS, "etchatron.html")
     if name not in PAGES:
         abort(404)
     return send_from_directory(DOCS, name + ".html")
@@ -1317,6 +1391,17 @@ def plot():
                       "polargraph takes its zero from wherever it hung at "
                       "power on, and nothing in software can check it.",
         })
+    elif chosen and chosen.get("driver") == "etchatron":
+        # The Etch A Sketch's zero is the middle of the screen: the Uno resets
+        # when the worker opens its port and takes wherever the stylus is.
+        claims.append({
+            "label": "the stylus is in the centre of the screen",
+            "ok": parked,
+            "detail": "" if parked else
+                      "confirm the stylus is in the middle of the screen. The "
+                      "Uno takes wherever it is as the centre when the plot "
+                      "starts, and nothing in software can check it.",
+        })
     else:
         claims.append({
             "label": "the carriage is parked in the home corner",
@@ -1358,6 +1443,9 @@ def plot():
         if entry["driver"] in ("grbl", "polargraph"):
             job.thread = threading.Thread(
                 target=grbl_worker, args=(job, paths, entry), daemon=True)
+        elif entry["driver"] == "etchatron":
+            job.thread = threading.Thread(
+                target=etchatron_worker, args=(job, paths, entry), daemon=True)
         else:
             job.thread = threading.Thread(
                 target=plot_worker,

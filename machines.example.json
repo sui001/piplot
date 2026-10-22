@@ -46,5 +46,14 @@
     "pen_down_z": 0,
     "pen_dwell_s": 0.25,
     "flip_y": true
+  },
+
+  "etchatron": {
+    "driver": "etchatron",
+    "travel": [1200, 1200],
+    "by_id": "*Arduino*",
+    "speed": 60,
+    "slack": [23, 17],
+    "blend": 3
   }
 }
